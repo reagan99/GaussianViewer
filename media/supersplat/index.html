@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>SuperSplat</title>
+        <meta charset="utf-8" />
+        <base href="">
+        <link rel="manifest" href="./manifest.json">
+        <link rel="stylesheet" href="./index.css">
+        <link rel="shortcut icon" href="#">
+        <meta name="description" content="SuperSplat is an advanced browser-based editor for manipulating and optimizing 3D Gaussian Splats. It is open source and engine agnostic." />
+        <meta name="keywords" content="PLY, Gaussian, Splat, PlayCanvas, Editor" />
+        <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0" />
+
+        <!-- Open Graph / Facebook -->
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content="https://playcanvas.com/supersplat/editor" />
+        <meta property="og:title" content="SuperSplat" />
+        <meta property="og:description" content="SuperSplat is an advanced browser-based editor for manipulating and optimizing 3D Gaussian Splats. It is open source and engine agnostic." />
+        <meta property="og:image" content="https://playcanvas.com/supersplat/editor/static/images/header.webp" />
+
+        <!-- Twitter -->
+        <meta property="twitter:card" content="summary_large_image" />
+        <meta property="twitter:url" content="https://playcanvas.com/supersplat/editor" />
+        <meta property="twitter:title" content="SuperSplat" />
+        <meta property="twitter:description" content="SuperSplat is an advanced browser-based editor for manipulating and optimizing 3D Gaussian Splats. It is open source and engine agnostic." />
+        <meta property="twitter:image" content="https://playcanvas.com/supersplat/editor/static/images/header.webp" />
+
+        <!-- jszip -->
+        <script src="jszip.js"></script>
+        
+        <!-- File input polyfill for iframe -->
+        <script src="fileInputPolyfill.js"></script>
+        
+        <!-- VS Code API initialization -->
+        <script>
+            // Initialize VS Code API
+            const vscode = acquireVsCodeApi();
+            window.vscode = vscode;
+            console.log('🔧 [INIT] VS Code API acquired:', !!vscode);
+            console.log('🔧 [INIT] VS Code API methods:', vscode ? Object.keys(vscode) : 'none');
+        </script>
+        
+        <!-- Override showOpenFilePicker for iframe compatibility -->
+        <script>
+            // More robust override that handles all cases
+            (function() {
+                const originalShowOpenFilePicker = window.showOpenFilePicker;
+                
+                // Force use of VS Code file dialog
+                window.showOpenFilePicker = function(options) {
+                    console.log('🔧 [OVERRIDE] showOpenFilePicker called with options:', options);
+                    console.log('🔧 [OVERRIDE] VS Code available:', typeof window.vscode !== 'undefined');
+                    
+                    // Always use VS Code API if available, even if it returns an error initially
+                    if (typeof window.vscode !== 'undefined') {
+                        console.log('🔧 [OVERRIDE] Forcing VS Code file dialog');
+                        return window.createFileInput(options);
+                    } else {
+                        console.log('VS Code not available, blocking local file picker');
+                        // Block the local file picker and show a message
+                        return Promise.reject(new Error('File selection is only available through VS Code workspace'));
+                    }
+                };
+                
+                // Also override it on the global object
+                Object.defineProperty(window, 'showOpenFilePicker', {
+                    value: function(options) {
+                        console.log('showOpenFilePicker (override) called with options:', options);
+                        console.log('VS Code available:', typeof window.vscode !== 'undefined');
+                        
+                        if (typeof window.vscode !== 'undefined') {
+                            console.log('Forcing VS Code file dialog (defineProperty)');
+                            return window.createFileInput(options);
+                        } else {
+                            console.log('VS Code not available, blocking local file picker (defineProperty)');
+                            return Promise.reject(new Error('File selection is only available through VS Code workspace'));
+                        }
+                    },
+                    writable: false,
+                    configurable: true
+                });
+                
+                // Add error handler
+                window.addEventListener('error', function(e) {
+                    if (e.message && e.message.includes('showOpenFilePicker')) {
+                        console.error('showOpenFilePicker error caught, using polyfill');
+                        e.preventDefault();
+                    }
+                });
+                
+                console.log('🔧 [INIT] File picker polyfill installed, VS Code available:', typeof window.vscode !== 'undefined');
+                console.log('🔧 [INIT] createFileInput function available:', typeof window.createFileInput !== 'undefined');
+            })();
+        </script>
+
+        <!-- Service worker -->
+        <script>
+            const sw = navigator.serviceWorker;
+            if (sw) {
+                sw.register('./sw.js')
+                    .then(reg => console.log('service worker registered', reg))
+                    .catch(err => console.log('failed to register service worker', err));
+            }
+        </script>
+    </head>
+
+    <body>
+        <script type="module" src="./index.js"></script>
+    </body>
+</html>

@@ -1,0 +1,121 @@
+{
+  "name": "gaussian-viewer",
+  "publisher": "GaussianViewer",
+  "displayName": "GaussianViewer",
+  "description": "View and edit 3D Gaussian Splat files (.ply, .splat, .gsplat) directly in VSCode with full SuperSplat editor integration",
+  "version": "1.0.5",
+  "icon": "logo.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reagan99/GaussianViewer"
+  },
+  "bugs": {
+    "url": "https://github.com/reagan99/GaussianViewer/issues"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "3d",
+    "gaussian",
+    "splat",
+    "ply",
+    "3dgs",
+    "point cloud",
+    "viewer",
+    "editor",
+    "vscode"
+  ],
+  "activationEvents": [
+    "onCustomEditor:supersplat.viewer"
+  ],
+  "main": "./out/optimizedExtension.js",
+  "contributes": {
+    "capabilities": {
+      "untrustedWorkspaces": {
+        "supported": true
+      }
+    },
+    "customEditors": [
+      {
+        "viewType": "supersplat.viewer",
+        "displayName": "SuperSplat Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.ply"
+          },
+          {
+            "filenamePattern": "*.splat"
+          },
+          {
+            "filenamePattern": "*.gsplat"
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "VSCode SuperSplat",
+      "properties": {
+        "supersplat.backgroundColor": {
+          "type": "string",
+          "default": "#121212",
+          "description": "Default background color for the viewer."
+        },
+        "supersplat.enableEditing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable editing capabilities in the viewer."
+        },
+        "supersplat.showGrid": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show grid helper in the viewer."
+        },
+        "supersplat.showAxes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show axes helper in the viewer."
+        },
+        "supersplat.performance.enableASCIIToBinaryConversion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically convert ASCII PLY files to binary format for faster loading"
+        },
+        "supersplat.performance.enablePLYCaching": {
+          "type": "boolean",
+          "default": true,
+          "description": "Cache converted PLY files to avoid re-processing"
+        },
+        "supersplat.performance.largeFileThreshold": {
+          "type": "number",
+          "default": 10,
+          "description": "File size threshold in MB for using optimized transfer methods"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "echo 'Pre-compiled optimized version ready'",
+    "compile": "echo 'Using pre-compiled JavaScript files'",
+    "watch": "echo 'Using pre-compiled JavaScript files'",
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.16.5",
+    "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "eslint": "^9.18.0",
+    "glob": "^11.0.1",
+    "mocha": "^11.0.1",
+    "typescript": "^5.8.3",
+    "vsce": "^2.15.0",
+    "vscode-test": "^1.6.1"
+  }
+}
