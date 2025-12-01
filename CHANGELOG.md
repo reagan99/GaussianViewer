@@ -1,5 +1,15 @@
 # Change Log
 
+## [1.0.6] - 2025-12-01
+
+### Fixed
+- Large files (>2GB) now load reliably by streaming bytes instead of hitting the Buffer size limit.
+- Prevented invalid base64 decode errors during chunked streaming for big files.
+
+### Changed
+- Switched webview/extension transfer from base64 to `Uint8Array` to reduce overhead and memory usage.
+- Receiver now branches automatically based on binary/base64 mode for safer chunk handling.
+
 ## [1.0.5] - 2025-08-31
 
 ### 🎯 Major Feature: Save/Export System Implementation

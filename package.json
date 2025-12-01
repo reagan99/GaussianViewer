@@ -3,7 +3,7 @@
   "publisher": "GaussianViewer",
   "displayName": "GaussianViewer",
   "description": "View and edit 3D Gaussian Splat files (.ply, .splat, .gsplat) directly in VSCode with full SuperSplat editor integration",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "icon": "logo.png",
   "engines": {
     "vscode": "^1.96.0"

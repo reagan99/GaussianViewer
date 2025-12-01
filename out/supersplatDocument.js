@@ -51,6 +51,17 @@ class SuperSplatDocument {
         if (uri.scheme === "untitled") {
             return new Uint8Array();
         }
+        try {
+            const stat = await vscode.workspace.fs.stat(uri);
+            const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+            if (stat.size > maxInMemorySize) {
+                vscode.window.showWarningMessage('파일이 매우 커서 전체를 메모리에 로드하지 않고 스트리밍 모드로 엽니다.');
+                return new Uint8Array();
+            }
+        }
+        catch {
+            // If stat fails, fall back to direct read
+        }
         return new Uint8Array(await vscode.workspace.fs.readFile(uri));
     }
     constructor(uri, initialContent) {

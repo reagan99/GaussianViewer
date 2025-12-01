@@ -389,7 +389,7 @@
                         console.log('🚀 [BASE64] Total chunks:', message.totalChunks, 'Size:', (message.totalSize / (1024 * 1024)).toFixed(2), 'MB');
                         
                         streamingState.isStreaming = true;
-                        streamingState.isBase64Mode = true;
+                        streamingState.isBase64Mode = message.encoding !== 'binary';
                         streamingState.expectedChunks = message.totalChunks;
                         streamingState.binaryChunks = new Array(message.totalChunks);
                         streamingState.receivedChunks = 0;
@@ -397,11 +397,15 @@
                         streamingState.filename = message.filename;
                         streamingState.requestId = message.requestId;
                         
-                        console.log('🚀 [BASE64] Base64 streaming state initialized');
+                        console.log(`🚀 [BASE64] Streaming state initialized (mode=${streamingState.isBase64Mode ? 'base64' : 'binary'})`);
                         break;
                         
                     case 'fileChunk':
-                        handleBase64Chunk(message, streamingState);
+                        if (message.encoding === 'binary' || !streamingState.isBase64Mode) {
+                            handleBinaryChunk(message, streamingState);
+                        } else {
+                            handleBase64Chunk(message, streamingState);
+                        }
                         break;
                         
                     case 'fileError':
@@ -410,6 +414,98 @@
                 }
             }
             
+            function finalizeChunks(streamingState) {
+                const missingChunks = [];
+                for (let i = 0; i < streamingState.binaryChunks.length; i++) {
+                    if (!streamingState.binaryChunks[i]) {
+                        missingChunks.push(i);
+                    }
+                }
+                
+                if (missingChunks.length > 0) {
+                    console.error('❌ [BASE64] Missing chunks:', missingChunks.join(', '));
+                    return;
+                }
+                
+                const blob = new Blob(streamingState.binaryChunks);
+                console.log(`✅ [BASE64] Large file assembled, size: ${blob.size} bytes (mode=${streamingState.isBase64Mode ? 'base64' : 'binary'})`);
+                
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const header = new Uint8Array(e.target.result.slice(0, 100));
+                    const headerText = new TextDecoder().decode(header);
+                    console.log('🔍 [BASE64] File header:', headerText.substring(0, 50));
+                    
+                    if (headerText.includes('ply') || headerText.includes('PLY')) {
+                        console.log('✅ [BASE64] Valid PLY file detected');
+                    } else {
+                        console.warn('⚠️ [BASE64] Invalid PLY header, file may be corrupted');
+                    }
+                };
+                reader.readAsArrayBuffer(blob.slice(0, 100));
+                
+                const url = URL.createObjectURL(blob);
+                const filename = streamingState.filename || window.originalFileName || 'large-file.ply';
+                console.log('📤 [BASE64] Loading into SuperSplat with filename:', filename);
+                loadFileIntoSuperSplat(url, filename);
+                
+                streamingState.isStreaming = false;
+                streamingState.isBase64Mode = false;
+                streamingState.requestId = null;
+                streamingState.binaryChunks = null;
+                streamingState.expectedChunks = 0;
+                streamingState.receivedChunks = 0;
+                
+                console.log('🔄 [BASE64] Streaming state reset after successful load');
+                logPerformance(`Chunked file loaded successfully: ${blob.size} bytes`);
+            }
+
+            function handleBinaryChunk(message, streamingState) {
+                if (!streamingState.isStreaming) {
+                    console.log('⚠️ [BINARY] Ignoring chunk - not in streaming mode');
+                    return;
+                }
+                if (message.requestId !== streamingState.requestId) {
+                    console.log('🔄 [BINARY] Different requestId detected, updating state');
+                    streamingState.requestId = message.requestId;
+                }
+
+                let chunkBytes;
+                if (message.data instanceof ArrayBuffer) {
+                    chunkBytes = new Uint8Array(message.data);
+                } else if (ArrayBuffer.isView(message.data)) {
+                    const view = message.data;
+                    chunkBytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+                } else if (typeof message.data === 'string') {
+                    try {
+                        const binaryString = atob(message.data);
+                        chunkBytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            chunkBytes[i] = binaryString.charCodeAt(i);
+                        }
+                    } catch (e) {
+                        console.error('❌ [BINARY] Failed to decode string chunk:', e);
+                        return;
+                    }
+                } else {
+                    console.error('Unsupported binary chunk format:', typeof message.data);
+                    return;
+                }
+
+                streamingState.binaryChunks[message.chunkIndex] = chunkBytes;
+                streamingState.receivedChunks++;
+
+                const progress = (streamingState.receivedChunks / streamingState.expectedChunks) * 100;
+                if (message.chunkIndex % Math.ceil(streamingState.expectedChunks / 20) === 0 || message.isLastChunk) {
+                    console.log(`📊 [BINARY] Progress: ${progress.toFixed(1)}% (${streamingState.receivedChunks}/${streamingState.expectedChunks})`);
+                    logPerformance(`Binary chunk progress: ${progress.toFixed(1)}%`);
+                }
+
+                if (message.isLastChunk || streamingState.receivedChunks === streamingState.expectedChunks) {
+                    finalizeChunks(streamingState);
+                }
+            }
+
             // 1.0.1 스타일 base64 청크 처리 함수
             function handleBase64Chunk(message, streamingState) {
                 if (!streamingState.isBase64Mode) {
@@ -417,21 +513,35 @@
                     return;
                 }
                 
-                // requestId가 다르면 새로운 스트림 시작으로 간주하고 상태 리셋
                 if (message.requestId !== streamingState.requestId) {
                     console.log('🔄 [BASE64] Different requestId detected, updating state');
                     streamingState.requestId = message.requestId;
-                    // 기존 청크 데이터는 유지하되 requestId만 업데이트
                 }
                 
                 console.log(`📦 [BASE64] Processing chunk ${message.chunkIndex}/${message.totalChunks}`);
                 
                 try {
-                    // Decode base64 chunk immediately into a Uint8Array (1.0.1 방식)
-                    const binaryString = atob(message.data);
-                    const chunkBytes = new Uint8Array(binaryString.length);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        chunkBytes[i] = binaryString.charCodeAt(i);
+                    let chunkBytes;
+                    const isBinary = message.encoding === 'binary' || message.data instanceof ArrayBuffer || ArrayBuffer.isView(message.data);
+                    if (isBinary) {
+                        if (message.data instanceof ArrayBuffer) {
+                            chunkBytes = new Uint8Array(message.data);
+                        } else if (ArrayBuffer.isView(message.data)) {
+                            const view = message.data;
+                            chunkBytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+                        } else {
+                            console.error('Unsupported binary chunk format:', typeof message.data);
+                            return;
+                        }
+                    } else if (typeof message.data === 'string') {
+                        const binaryString = atob(message.data);
+                        chunkBytes = new Uint8Array(binaryString.length);
+                        for (let i = 0; i < binaryString.length; i++) {
+                            chunkBytes[i] = binaryString.charCodeAt(i);
+                        }
+                    } else {
+                        console.error('Unsupported chunk format:', typeof message.data);
+                        return;
                     }
                     
                     streamingState.binaryChunks[message.chunkIndex] = chunkBytes;
@@ -443,60 +553,9 @@
                         logPerformance(`Base64 chunk progress: ${progress.toFixed(1)}%`);
                     }
                     
-                    // Check if all chunks are received
                     if (message.isLastChunk || streamingState.receivedChunks === streamingState.expectedChunks) {
                         console.log('🎉 [BASE64] All chunks received, assembling file...');
-                        
-                        // Verify all chunks are present (1.0.1 방식)
-                        const missingChunks = [];
-                        for (let i = 0; i < streamingState.binaryChunks.length; i++) {
-                            if (!streamingState.binaryChunks[i]) {
-                                missingChunks.push(i);
-                            }
-                        }
-                        
-                        if (missingChunks.length > 0) {
-                            console.error('❌ [BASE64] Missing chunks:', missingChunks.join(', '));
-                            return;
-                        }
-                        
-                        // Create a Blob directly from the array of Uint8Arrays (1.0.1 방식)
-                        const blob = new Blob(streamingState.binaryChunks);
-                        console.log('✅ [BASE64] Large file assembled from base64 chunks, size:', blob.size, 'bytes');
-                        
-                        // 파일 헤더 검증
-                        const reader = new FileReader();
-                        reader.onload = function(e) {
-                            const header = new Uint8Array(e.target.result.slice(0, 100));
-                            const headerText = new TextDecoder().decode(header);
-                            console.log('🔍 [BASE64] File header:', headerText.substring(0, 50));
-                            
-                            if (headerText.includes('ply') || headerText.includes('PLY')) {
-                                console.log('✅ [BASE64] Valid PLY file detected');
-                            } else {
-                                console.warn('⚠️ [BASE64] Invalid PLY header, file may be corrupted');
-                            }
-                        };
-                        reader.readAsArrayBuffer(blob.slice(0, 100));
-                        
-                        const url = URL.createObjectURL(blob);
-                        console.log('🔗 [BASE64] Created blob URL:', url);
-                        
-                        // Load into SuperSplat with proper filename
-                        const filename = streamingState.filename || window.originalFileName || 'large-file.ply';
-                        console.log('📤 [BASE64] Loading into SuperSplat with filename:', filename);
-                        loadFileIntoSuperSplat(url, filename);
-                        
-                        // Reset streaming state completely
-                        streamingState.isStreaming = false;
-                        streamingState.isBase64Mode = false;
-                        streamingState.requestId = null;
-                        streamingState.binaryChunks = null;
-                        streamingState.expectedChunks = 0;
-                        streamingState.receivedChunks = 0;
-                        
-                        console.log('🔄 [BASE64] Streaming state reset after successful load');
-                        logPerformance(`Base64 chunked file loaded successfully: ${blob.size} bytes`);
+                        finalizeChunks(streamingState);
                     }
                     
                 } catch (error) {
@@ -1000,14 +1059,25 @@
 
                         // Handle small files (sent directly)
                         if (message.type === 'fileData') {
-                            console.log('Received single file data, size:', message.data.length);
+                            console.log('Received single file data, size:', message.data?.length || message.size);
                             clearTimeout(timeout);
                             window.removeEventListener('message', messageHandler);
                             
-                            const binaryString = atob(message.data);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                bytes[i] = binaryString.charCodeAt(i);
+                            let bytes;
+                            if (typeof message.data === 'string') {
+                                // Backward-compatible base64 payload
+                                const binaryString = atob(message.data);
+                                bytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    bytes[i] = binaryString.charCodeAt(i);
+                                }
+                            } else if (message.data instanceof ArrayBuffer) {
+                                bytes = new Uint8Array(message.data);
+                            } else if (ArrayBuffer.isView(message.data)) {
+                                const view = message.data;
+                                bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+                            } else {
+                                return reject(new Error('Unsupported file data format'));
                             }
                             const blob = new Blob([bytes]);
                             resolve({ blob: blob, filename: message.filename });
@@ -1021,10 +1091,21 @@
                         
                         // Handle individual chunks
                         } else if (message.type === 'fileChunk') {
-                            const binaryString = atob(message.data);
-                            const chunkBytes = new Uint8Array(binaryString.length);
-                            for (let i = 0; i < binaryString.length; i++) {
-                                chunkBytes[i] = binaryString.charCodeAt(i);
+                            let chunkBytes;
+                            if (typeof message.data === 'string') {
+                                const binaryString = atob(message.data);
+                                chunkBytes = new Uint8Array(binaryString.length);
+                                for (let i = 0; i < binaryString.length; i++) {
+                                    chunkBytes[i] = binaryString.charCodeAt(i);
+                                }
+                            } else if (message.data instanceof ArrayBuffer) {
+                                chunkBytes = new Uint8Array(message.data);
+                            } else if (ArrayBuffer.isView(message.data)) {
+                                const view = message.data;
+                                chunkBytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+                            } else {
+                                console.error('Unsupported chunk format:', typeof message.data);
+                                return;
                             }
                             binaryChunks[message.chunkIndex] = chunkBytes;
                             receivedChunksCount++;

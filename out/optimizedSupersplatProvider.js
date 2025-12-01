@@ -104,6 +104,13 @@ class OptimizedSuperSplatProvider {
         }
         const document = await supersplatDocument_1.SuperSplatDocument.create(uri, openContext.backupId, {
             getFileData: async () => {
+                const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+                const stat = await vscode.workspace.fs.stat(uri);
+                if (stat.size > maxInMemorySize) {
+                    this.logPerformance(`[OPEN] Skipping full in-memory read for very large file (${(stat.size / (1024 * 1024)).toFixed(2)} MB)`);
+                    vscode.window.showWarningMessage('파일이 매우 커서 전체를 메모리에 올리지 않고 스트리밍 모드로 엽니다.');
+                    return new Uint8Array();
+                }
                 const fileData = await vscode.workspace.fs.readFile(uri);
                 return new Uint8Array(fileData);
             }
@@ -256,7 +263,7 @@ class OptimizedSuperSplatProvider {
         return path.join(ws.uri.fsPath, reqPath);
     }
     
-    async streamFileToWebviewBase64(webviewPanel, absPath, requestId, chunkSize = 8 * 1024 * 1024) {
+    async streamFileToWebviewBase64(webviewPanel, absPath, requestId, chunkSize = 16 * 1024 * 1024) {
         const stats = fs.statSync(absPath);
         const totalSize = stats.size;
         const totalChunks = Math.ceil(totalSize / chunkSize);
@@ -288,16 +295,12 @@ class OptimizedSuperSplatProvider {
                 requestId,
                 chunkIndex,
                 totalChunks,
-                data: chunk.toString('base64'),
-                isLastChunk: isLast
+                data: new Uint8Array(chunk),
+                isLastChunk: isLast,
+                encoding: 'binary'
             });
             
             chunkIndex++;
-            
-            // Small delay to prevent overwhelming
-            if (chunkIndex % 10 === 0) {
-                await new Promise(resolve => setTimeout(resolve, 1));
-            }
         }
         
         console.log('📥 [IMPORT] Import stream completed:', sentBytes, 'bytes sent in', chunkIndex, 'chunks');
@@ -351,13 +354,13 @@ class OptimizedSuperSplatProvider {
         // Mark as active streaming session
         this.activeStreamingSessions.set(documentKey, Date.now());
         
-        // Use 1.0.1 style base64 chunking for better compatibility
+        // Use 1.0.1 style chunking for compatibility (now binary, not base64)
         // Adaptive chunk size based on file size
         let chunkSize;
-        if (fileSizeMB < 100) chunkSize = 1 * 1024 * 1024;      // 1MB
-        else if (fileSizeMB < 500) chunkSize = 5 * 1024 * 1024;  // 5MB  
-        else if (fileSizeMB < 1000) chunkSize = 10 * 1024 * 1024; // 10MB
-        else chunkSize = 20 * 1024 * 1024;                       // 20MB for 1.3GB+
+        if (fileSizeMB < 100) chunkSize = 4 * 1024 * 1024;       // 4MB
+        else if (fileSizeMB < 500) chunkSize = 8 * 1024 * 1024;  // 8MB  
+        else if (fileSizeMB < 1500) chunkSize = 16 * 1024 * 1024; // 16MB
+        else chunkSize = 32 * 1024 * 1024;                        // 32MB for very large files
         
         this.logPerformance(`[FALLBACK] Using adaptive chunk size: ${(chunkSize / (1024 * 1024)).toFixed(0)}MB for ${fileSizeMB.toFixed(2)}MB file`);
         
@@ -375,7 +378,7 @@ class OptimizedSuperSplatProvider {
     // 1.0.1 스타일의 base64 청크 전송 (스트리밍용)
     async handleLargeFileTransferV2(document, webviewPanel, requestId, fileSize, chunkSize) {
         const totalChunks = Math.ceil(fileSize / chunkSize);
-        this.logPerformance(`[STREAMING] Starting base64 chunked transfer: ${totalChunks} chunks of ${(chunkSize / (1024 * 1024)).toFixed(0)}MB each`);
+        this.logPerformance(`[STREAMING] Starting binary chunked transfer: ${totalChunks} chunks of ${(chunkSize / (1024 * 1024)).toFixed(0)}MB each`);
         
         try {
             const optimizedPath = this.optimizedPaths.get(document.uri.toString()) || document.uri.fsPath;
@@ -395,23 +398,18 @@ class OptimizedSuperSplatProvider {
             let chunkIndex = 0;
             
             for await (const chunk of stream) {
-                // Convert to base64 like 1.0.1
-                const base64Chunk = Buffer.from(chunk).toString('base64');
+                const uint8Chunk = new Uint8Array(chunk);
                 
-                // Validate base64 encoding
-                if (!base64Chunk || base64Chunk.length === 0) {
-                    throw new Error(`Invalid base64 chunk at index ${chunkIndex}`);
-                }
-                
-                // Send chunk (1.0.1 style message)
+                // Send chunk (1.0.1 style message, binary payload)
                 webviewPanel.webview.postMessage({
                     type: 'fileChunk',
                     requestId: requestId,
                     chunkIndex: chunkIndex,
                     totalChunks: totalChunks,
-                    data: base64Chunk,
+                    data: uint8Chunk,
                     chunkSize: chunk.length,
-                    isLastChunk: chunkIndex === totalChunks - 1
+                    isLastChunk: chunkIndex === totalChunks - 1,
+                    encoding: 'binary'
                 });
                 
                 // Log progress every 5%
@@ -421,14 +419,9 @@ class OptimizedSuperSplatProvider {
                 }
                 
                 chunkIndex++;
-                
-                // Small delay to prevent Extension Host overload
-                if (chunkIndex % 10 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 1));
-                }
             }
             
-            this.logPerformance(`[STREAMING] Completed base64 chunked transfer: ${totalChunks} chunks sent`);
+            this.logPerformance(`[STREAMING] Completed binary chunked transfer: ${totalChunks} chunks sent`);
             
         } catch (error) {
             this.logPerformance(`[STREAMING] Error in base64 chunked transfer: ${error}`);
@@ -752,35 +745,56 @@ class OptimizedSuperSplatProvider {
             if (fileUris && fileUris.length > 0) {
                 // Convert file URIs to file handles compatible with the web API
                 const fileHandles = await Promise.all(fileUris.map(async (uri) => {
-                    const fileData = await vscode.workspace.fs.readFile(uri);
                     const stats = await vscode.workspace.fs.stat(uri);
+                    const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+                    const isTooLarge = stats.size > maxInMemorySize;
+                    const fileData = isTooLarge ? null : await vscode.workspace.fs.readFile(uri);
+                    const buildStream = () => new ReadableStream({
+                        start(controller) {
+                            if (isTooLarge) {
+                                const fileStream = fs.createReadStream(uri.fsPath, { highWaterMark: 64 * 1024 });
+                                fileStream.on('data', chunk => controller.enqueue(chunk));
+                                fileStream.on('end', () => controller.close());
+                                fileStream.on('error', err => controller.error(err));
+                            }
+                            else if (fileData) {
+                                controller.enqueue(fileData);
+                                controller.close();
+                            }
+                            else {
+                                controller.close();
+                            }
+                        }
+                    });
+                    const arrayBuffer = () => {
+                        if (isTooLarge || !fileData) {
+                            return Promise.reject(new Error('파일이 너무 커서 메모리에 올릴 수 없습니다. 스트리밍으로만 처리합니다.'));
+                        }
+                        return Promise.resolve(fileData.buffer);
+                    };
+                    const text = () => {
+                        if (isTooLarge || !fileData) {
+                            return Promise.reject(new Error('파일이 너무 커서 텍스트로 즉시 변환할 수 없습니다.'));
+                        }
+                        return Promise.resolve(new TextDecoder().decode(fileData));
+                    };
                     
                     return {
                         name: path.basename(uri.fsPath),
                         size: stats.size,
                         type: this.getMimeType(uri.fsPath),
                         lastModified: stats.mtime,
-                        stream: () => new ReadableStream({
-                            start(controller) {
-                                controller.enqueue(fileData);
-                                controller.close();
-                            }
-                        }),
-                        arrayBuffer: () => Promise.resolve(fileData.buffer),
-                        text: () => Promise.resolve(new TextDecoder().decode(fileData)),
+                        stream: buildStream,
+                        arrayBuffer,
+                        text,
                         getFile: () => ({ 
                             name: path.basename(uri.fsPath),
                             size: stats.size,
                             type: this.getMimeType(uri.fsPath),
                             lastModified: stats.mtime,
-                            arrayBuffer: () => Promise.resolve(fileData.buffer),
-                            text: () => Promise.resolve(new TextDecoder().decode(fileData)),
-                            stream: () => new ReadableStream({
-                                start(controller) {
-                                    controller.enqueue(fileData);
-                                    controller.close();
-                                }
-                            })
+                            arrayBuffer,
+                            text,
+                            stream: buildStream
                         })
                     };
                 }));

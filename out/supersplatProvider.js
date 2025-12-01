@@ -114,21 +114,21 @@ class SuperSplatProvider {
             // For large files, use chunked transfer instead of direct URI (lowered threshold for SSH)
             if (fileSizeInMB > 100) {
                 this.writeToLogFile(`[VSCode] Using chunked transfer for large file`);
-                this.handleLargeFileTransfer(requestId, document, fileStat.size);
+                await this.handleLargeFileTransfer(requestId, document, fileStat.size);
                 return;
             }
-            // For smaller files, use the original base64 method
+            // For smaller files, send raw bytes (avoids base64 inflation)
             const fileData = await vscode.workspace.fs.readFile(document.uri);
-            const base64Data = Buffer.from(fileData).toString('base64');
             this.writeToLogFile(`[VSCode] File data read successfully, size: ${fileData.length} bytes`);
-            // Send file data back to webview
+            // Send file data back to webview as Uint8Array
             for (const webviewPanel of this.webviews.get(document.uri)) {
                 webviewPanel.webview.postMessage({
                     type: 'fileData',
                     requestId: requestId,
-                    data: base64Data,
+                    data: fileData,
                     filename: path.basename(document.uri.fsPath),
-                    size: fileStat.size
+                    size: fileStat.size,
+                    encoding: 'binary'
                 });
             }
         }
@@ -146,7 +146,7 @@ class SuperSplatProvider {
         }
     }
     async handleLargeFileTransfer(requestId, document, fileSize) {
-        const CHUNK_SIZE = 512 * 1024; // 512KB chunks for better stability in remote connections
+        const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks for faster transfer of large files
         const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
         this.writeToLogFile(`[VSCode] Starting chunked transfer: ${totalChunks} chunks of ${CHUNK_SIZE} bytes each`);
         try {
@@ -161,37 +161,58 @@ class SuperSplatProvider {
                     filename: path.basename(document.uri.fsPath)
                 });
             }
-            // Read and send file in chunks
-            const fileData = await vscode.workspace.fs.readFile(document.uri);
-            for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-                const start = chunkIndex * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, fileSize);
-                const chunk = fileData.slice(start, end);
-                const base64Chunk = Buffer.from(chunk).toString('base64');
-                // Validate base64 encoding
-                if (!base64Chunk || base64Chunk.length === 0) {
-                    throw new Error(`Invalid base64 chunk at index ${chunkIndex}`);
+            const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+            // Prefer streaming to avoid Buffer limits
+            if (document.uri.scheme === 'file') {
+                const stream = fs.createReadStream(document.uri.fsPath, { highWaterMark: CHUNK_SIZE });
+                let chunkIndex = 0;
+                let bytesSent = 0;
+                for await (const chunk of stream) {
+                    const isLastChunk = bytesSent + chunk.length >= fileSize;
+                    const uint8Chunk = new Uint8Array(chunk);
+                    for (const webviewPanel of this.webviews.get(document.uri)) {
+                        webviewPanel.webview.postMessage({
+                            type: 'fileChunk',
+                            requestId: requestId,
+                            chunkIndex: chunkIndex,
+                            totalChunks: totalChunks,
+                            data: uint8Chunk,
+                            chunkSize: chunk.length,
+                            isLastChunk: isLastChunk,
+                            encoding: 'binary'
+                        });
+                    }
+                    bytesSent += chunk.length;
+                    // Log progress every 10%
+                    if (chunkIndex % Math.ceil(totalChunks / 10) === 0) {
+                        const progress = (bytesSent / fileSize) * 100;
+                        this.writeToLogFile(`[VSCode] Chunk transfer progress: ${progress.toFixed(1)}%`);
+                    }
+                    chunkIndex++;
                 }
-                // Send chunk
-                for (const webviewPanel of this.webviews.get(document.uri)) {
-                    webviewPanel.webview.postMessage({
-                        type: 'fileChunk',
-                        requestId: requestId,
-                        chunkIndex: chunkIndex,
-                        totalChunks: totalChunks,
-                        data: base64Chunk,
-                        chunkSize: chunk.length,
-                        isLastChunk: chunkIndex === totalChunks - 1
-                    });
+            }
+            else {
+                if (fileSize > maxInMemorySize) {
+                    throw new Error('파일이 너무 커서 현재 스키마에서는 스트리밍을 지원하지 않습니다. 로컬 파일로 접근하세요.');
                 }
-                // Log progress every 10%
-                if (chunkIndex % Math.ceil(totalChunks / 10) === 0) {
-                    const progress = (chunkIndex / totalChunks) * 100;
-                    this.writeToLogFile(`[VSCode] Chunk transfer progress: ${progress.toFixed(1)}%`);
-                }
-                // Increased delay for remote SSH connections to prevent timeouts
-                if (chunkIndex % 5 === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 50));
+                const fileData = await vscode.workspace.fs.readFile(document.uri);
+                for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                    const start = chunkIndex * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, fileSize);
+                    const chunk = fileData.slice(start, end);
+                    const uint8Chunk = new Uint8Array(chunk);
+                    for (const webviewPanel of this.webviews.get(document.uri)) {
+                        webviewPanel.webview.postMessage({
+                            type: 'fileChunk',
+                            requestId: requestId,
+                            chunkIndex: chunkIndex,
+                            totalChunks: totalChunks,
+                            data: uint8Chunk,
+                            chunkSize: chunk.length,
+                            isLastChunk: chunkIndex === totalChunks - 1,
+                            encoding: 'binary'
+                        });
+                    }
                 }
             }
             this.writeToLogFile(`[VSCode] Chunked transfer completed successfully`);
@@ -213,6 +234,13 @@ class SuperSplatProvider {
         this.writeToLogFile(`[VSCode] Opening custom document: ${uri.fsPath}`);
         const document = await supersplatDocument_1.SuperSplatDocument.create(uri, openContext.backupId, {
             getFileData: async () => {
+                const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+                const stat = await vscode.workspace.fs.stat(uri);
+                if (stat.size > maxInMemorySize) {
+                    this.writeToLogFile(`[VSCode] Skipping full read for very large file (${(stat.size / (1024 * 1024)).toFixed(2)} MB)`);
+                    vscode.window.showWarningMessage('파일이 매우 커서 전체를 메모리에 올리지 않고 스트리밍 모드로 엽니다.');
+                    return new Uint8Array();
+                }
                 const fileData = await vscode.workspace.fs.readFile(uri);
                 this.writeToLogFile(`[VSCode] File data loaded, size: ${fileData.length} bytes`);
                 return new Uint8Array(fileData);
