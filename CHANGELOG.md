@@ -1,5 +1,18 @@
 # Change Log
 
+## [1.0.7] - 2026-01-27
+
+### Added
+- Eyedropper selection tool for selecting splats with similar colors (adjustable threshold).
+- Live threshold updates that re-run the last eyedropper selection.
+- Sponsor metadata for marketplace profiles.
+
+### Changed
+- About dialog/version display now matches the extension version.
+
+### Fixed
+- Prevented stale webview cache from serving outdated SuperSplat bundles.
+
 ## [1.0.6] - 2025-12-01
 
 ### Fixed

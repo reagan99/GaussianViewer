@@ -93,13 +93,18 @@
             })();
         </script>
 
-        <!-- Service worker -->
+        <!-- Disable service worker caching in VS Code webview -->
         <script>
             const sw = navigator.serviceWorker;
             if (sw) {
-                sw.register('./sw.js')
-                    .then(reg => console.log('service worker registered', reg))
-                    .catch(err => console.log('failed to register service worker', err));
+                sw.getRegistrations()
+                    .then(regs => Promise.all(regs.map(reg => reg.unregister())))
+                    .then(() => {
+                        if (window.caches && caches.keys) {
+                            return caches.keys().then(keys => Promise.all(keys.map(key => caches.delete(key))));
+                        }
+                    })
+                    .catch(() => {});
             }
         </script>
     </head>

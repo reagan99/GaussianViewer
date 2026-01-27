@@ -8,7 +8,7 @@
 
 ## 🎥 Preview
 
-![Gaussian Viewer Preview](images/preview.gif)
+![Gaussian Viewer Preview](https://github.com/reagan99/GaussianViewer/raw/HEAD/images/preview.gif)
 
 ---
 
@@ -25,6 +25,7 @@ This extension allows you to view and interact with `.ply`, `.splat`, or `.gspla
 - **Effortless File Viewing**: Simply click on a `.ply`, `.splat`, or `.gsplat` file to open it instantly.
 - **Streamlined Workflow**: Eliminate the need to switch between your browser and editor, keeping your focus on your projects.
 - **Remote-Ready**: Fully compatible with VS Code's Remote SSH, allowing you to work from anywhere.
+- **Eyedropper Selection**: Select splats by color similarity with a live-adjustable threshold.
 
 ---
 
@@ -58,6 +59,13 @@ This extension would not have been possible without the incredible work of the t
 We are immensely grateful for their open-source contribution to the 3D graphics community.
 
 This project was developed at the [Multimedia & Communication Systems Laboratory (MCSL)](http://mcsl.skku.edu/) at Sungkyunkwan University.
+
+---
+
+## ❤️ Sponsor
+
+If this extension helps your workflow, consider sponsoring development:  
+https://github.com/sponsors/reagan99
 
 ---
 

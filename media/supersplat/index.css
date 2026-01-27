@@ -2673,7 +2673,8 @@
   color: #f60;
 }
 
-#select-toolbar {
+#select-toolbar,
+.select-toolbar {
   position: absolute;
   left: 50%;
   bottom: 100px;
@@ -2685,10 +2686,12 @@
   flex-direction: row;
   align-items: center;
 }
-#select-toolbar:not(.pcui-hidden) {
+#select-toolbar:not(.pcui-hidden),
+.select-toolbar:not(.pcui-hidden) {
   display: flex;
 }
-#select-toolbar .select-toolbar-button {
+#select-toolbar .select-toolbar-button,
+.select-toolbar .select-toolbar-button {
   height: 38px;
   padding: 0px 16px;
   border-radius: 2px;
