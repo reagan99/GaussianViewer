@@ -58,8 +58,6 @@ This project is licensed under the **MIT License**. See the `LICENSE` file for m
 This extension would not have been possible without the incredible work of the team behind **[SuperSplat](https://playcanvas.com/supersplat/)**.  
 We are immensely grateful for their open-source contribution to the 3D graphics community.
 
-This project was developed at the [Multimedia & Communication Systems Laboratory (MCSL)](http://mcsl.skku.edu/) at Sungkyunkwan University.
-
 ---
 
 ## ❤️ Sponsor
