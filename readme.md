@@ -26,6 +26,12 @@ This extension allows you to view and interact with `.ply`, `.splat`, or `.gspla
 - **Streamlined Workflow**: Eliminate the need to switch between your browser and editor, keeping your focus on your projects.
 - **Remote-Ready**: Fully compatible with VS Code's Remote SSH, allowing you to work from anywhere.
 - **Eyedropper Selection**: Select splats by color similarity with a live-adjustable threshold.
+- **COLMAP Sparse Overlays**: Load a COLMAP project, `sparse`, or `sparse/0` folder and inspect sparse points with camera pose glyphs directly over the 3DGS scene.
+- **Click-to-Fly Cameras**: Click a loaded COLMAP camera glyph to jump to that camera viewpoint.
+- **Auxiliary Scene Overlays**: Add PLY, XYZ, TXT, CSV, COLMAP `points3D`, or OBJ mesh overlays and toggle them on/off from the Scene Manager.
+- **Viewpoint Tools**: Copy, save, and reload precise camera viewpoints as JSON.
+- **Cinematic Orbit Controls**: Run turntable, reverse, dolly, bob, or sway camera orbits from the Scene Manager.
+- **Large PLY Workflow Improvements**: Uses optimized loading paths and cache handling to reduce unnecessary memory copies for large 3DGS assets.
 
 ---
 

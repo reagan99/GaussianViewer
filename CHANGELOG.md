@@ -1,5 +1,22 @@
 # Change Log
 
+## [1.0.24] - 2026-09-08
+
+### Major Update
+- Added Scene Manager controls for loading auxiliary scene overlays without leaving the viewer.
+- Added COLMAP sparse reconstruction overlays from project, `sparse`, or `sparse/0` folders.
+- Added support for COLMAP `cameras.bin`, `images.bin`, and `points3D.bin` together, drawing sparse points and camera poses in the 3DGS scene.
+- Added camera overlay visibility toggles, point/camera count labels, and a compact camera size slider.
+- Added click-to-fly behavior for COLMAP camera glyphs.
+- Added standalone point overlays from PLY, XYZ, TXT, CSV, and COLMAP `points3D.bin` or `points3D.txt` style data.
+- Added OBJ mesh overlays as camera-synced wireframes.
+- Added viewpoint copy, save, and load commands.
+- Added cinematic camera orbit controls with multiple orbit modes inside the Scene Manager.
+- Improved large PLY loading by avoiding unnecessary full-memory reads where streaming/direct loading is available.
+- Fixed overlay coordinate alignment with SuperSplat's displayed 3DGS transform.
+- Fixed overlay rendering order so points and cameras no longer cover SuperSplat UI panels.
+- Fixed overlay file-picker cancellation state.
+
 ## [1.0.23] - 2026-09-08
 
 ### Fixed
