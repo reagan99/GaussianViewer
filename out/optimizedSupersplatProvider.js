@@ -53,7 +53,14 @@ class OptimizedSuperSplatProvider {
             },
             supportsMultipleEditorsPerDocument: false,
         });
-        return register;
+        const commands = [
+            vscode.commands.registerCommand('supersplat.viewpoint.copy', () => provider.copyCurrentViewpoint()),
+            vscode.commands.registerCommand('supersplat.viewpoint.save', () => provider.saveCurrentViewpoint()),
+            vscode.commands.registerCommand('supersplat.viewpoint.load', () => provider.loadViewpoint()),
+            vscode.commands.registerCommand('supersplat.camera.orbit.start', () => provider.startCinematicOrbit()),
+            vscode.commands.registerCommand('supersplat.camera.orbit.stop', () => provider.stopCinematicOrbit())
+        ];
+        return vscode.Disposable.from(register, ...commands);
     }
     constructor(_context) {
         this.optimizedPaths = new Map();
@@ -69,6 +76,7 @@ class OptimizedSuperSplatProvider {
         this.pendingSaveUri = null; // Track pending save URI
         this.pendingSaveType = null; // Track save type (ply or document)
         this.saves = new Map(); // Track chunked saves
+        this.cancelledOverlayRequests = new Set();
     }
     setupMinimalLogging() {
         const logDir = path.join(this._context.extensionPath, 'logs');
@@ -88,27 +96,269 @@ class OptimizedSuperSplatProvider {
             // Silently ignore log errors to avoid performance impact
         }
     }
-    async openCustomDocument(uri, openContext, token) {
-        this.logPerformance(`Opening document: ${uri.fsPath}`);
+    getActiveWebviewEntry() {
+        const entry = this.webviews.getActiveOrVisible();
+        if (!entry) {
+            vscode.window.showWarningMessage('Open a GaussianViewer editor tab first.');
+            return undefined;
+        }
+        return entry;
+    }
+    createRequestId(prefix) {
+        return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+    normalizeVec3(value, fieldName) {
+        const read = (key, index) => {
+            if (Array.isArray(value)) {
+                return Number(value[index]);
+            }
+            return Number(value?.[key]);
+        };
+        const vec = {
+            x: read('x', 0),
+            y: read('y', 1),
+            z: read('z', 2)
+        };
+        if (!Number.isFinite(vec.x) || !Number.isFinite(vec.y) || !Number.isFinite(vec.z)) {
+            throw new Error(`Invalid viewpoint ${fieldName}; expected finite x/y/z values.`);
+        }
+        return vec;
+    }
+    normalizeViewpoint(value) {
+        const source = value?.viewpoint || value?.camera || value;
+        if (!source || typeof source !== 'object') {
+            throw new Error('Invalid viewpoint JSON.');
+        }
+        const viewpoint = {
+            version: 1,
+            type: 'GaussianViewer.viewpoint',
+            position: this.normalizeVec3(source.position, 'position'),
+            target: this.normalizeVec3(source.target, 'target')
+        };
+        if (source.fov !== undefined && source.fov !== null) {
+            const fov = Number(source.fov);
+            if (!Number.isFinite(fov) || fov <= 0 || fov >= 180) {
+                throw new Error('Invalid viewpoint fov; expected a value between 0 and 180.');
+            }
+            viewpoint.fov = fov;
+        }
+        if (source.name && typeof source.name === 'string') {
+            viewpoint.name = source.name;
+        }
+        return viewpoint;
+    }
+    requestViewpoint(webviewPanel) {
+        const requestId = this.createRequestId('viewpoint-get');
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                disposable.dispose();
+                reject(new Error('Timed out waiting for the viewer camera pose.'));
+            }, 5000);
+            const disposable = webviewPanel.webview.onDidReceiveMessage((message) => {
+                if (message?.type !== 'viewpoint/get/response' || message.requestId !== requestId) {
+                    return;
+                }
+                clearTimeout(timeout);
+                disposable.dispose();
+                if (!message.success) {
+                    reject(new Error(message.error || 'Failed to read camera pose.'));
+                    return;
+                }
+                try {
+                    resolve(this.normalizeViewpoint(message.viewpoint));
+                }
+                catch (error) {
+                    reject(error);
+                }
+            });
+            webviewPanel.webview.postMessage({ type: 'viewpoint/get', requestId }).then((sent) => {
+                if (!sent) {
+                    clearTimeout(timeout);
+                    disposable.dispose();
+                    reject(new Error('Failed to send viewpoint request to the viewer.'));
+                }
+            });
+        });
+    }
+    applyViewpoint(webviewPanel, viewpoint) {
+        const requestId = this.createRequestId('viewpoint-apply');
+        const normalized = this.normalizeViewpoint(viewpoint);
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                disposable.dispose();
+                reject(new Error('Timed out waiting for the viewer to apply the camera pose.'));
+            }, 5000);
+            const disposable = webviewPanel.webview.onDidReceiveMessage((message) => {
+                if (message?.type !== 'viewpoint/apply/response' || message.requestId !== requestId) {
+                    return;
+                }
+                clearTimeout(timeout);
+                disposable.dispose();
+                if (!message.success) {
+                    reject(new Error(message.error || 'Failed to apply camera pose.'));
+                    return;
+                }
+                resolve();
+            });
+            webviewPanel.webview.postMessage({
+                type: 'viewpoint/apply',
+                requestId,
+                viewpoint: normalized,
+                duration: 0
+            }).then((sent) => {
+                if (!sent) {
+                    clearTimeout(timeout);
+                    disposable.dispose();
+                    reject(new Error('Failed to send viewpoint to the viewer.'));
+                }
+            });
+        });
+    }
+    async copyCurrentViewpoint() {
+        const entry = this.getActiveWebviewEntry();
+        if (!entry) {
+            return;
+        }
         try {
-            const optimizedPath = await this.plyOptimizer.optimizePLY(uri.fsPath);
-            this.optimizedPaths.set(uri.toString(), optimizedPath);
-            this.logPerformance(`Optimized path for ${uri.fsPath}: ${optimizedPath}`);
+            const viewpoint = await this.requestViewpoint(entry.webviewPanel);
+            const documentUri = vscode.Uri.parse(entry.resource);
+            const payload = {
+                ...viewpoint,
+                createdAt: new Date().toISOString(),
+                sourceFile: path.basename(documentUri.fsPath || documentUri.path)
+            };
+            await vscode.env.clipboard.writeText(JSON.stringify(payload, null, 2));
+            vscode.window.showInformationMessage('Current viewpoint copied to clipboard.');
         }
         catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.logPerformance(`Error optimizing PLY ${uri.fsPath}: ${errorMessage}`);
-            vscode.window.showErrorMessage(`Failed to optimize PLY file: ${errorMessage}`);
-            // Fallback to original path if optimization fails
+            vscode.window.showErrorMessage(`Failed to copy viewpoint: ${error.message || String(error)}`);
+        }
+    }
+    async saveCurrentViewpoint() {
+        const entry = this.getActiveWebviewEntry();
+        if (!entry) {
+            return;
+        }
+        try {
+            const viewpoint = await this.requestViewpoint(entry.webviewPanel);
+            const documentUri = vscode.Uri.parse(entry.resource);
+            const baseName = path.basename(documentUri.fsPath || documentUri.path, path.extname(documentUri.fsPath || documentUri.path));
+            const defaultUri = vscode.Uri.joinPath(this.getParentUri(documentUri), `${baseName}.viewpoint.json`);
+            const targetUri = await vscode.window.showSaveDialog({
+                defaultUri,
+                filters: {
+                    'GaussianViewer Viewpoint': ['json'],
+                    'All Files': ['*']
+                }
+            });
+            if (!targetUri) {
+                return;
+            }
+            const payload = {
+                ...viewpoint,
+                createdAt: new Date().toISOString(),
+                sourceFile: path.basename(documentUri.fsPath || documentUri.path)
+            };
+            await vscode.workspace.fs.writeFile(targetUri, Buffer.from(JSON.stringify(payload, null, 2) + '\n', 'utf8'));
+            vscode.window.showInformationMessage(`Viewpoint saved: ${path.basename(targetUri.fsPath || targetUri.path)}`);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to save viewpoint: ${error.message || String(error)}`);
+        }
+    }
+    async loadViewpoint() {
+        const entry = this.getActiveWebviewEntry();
+        if (!entry) {
+            return;
+        }
+        try {
+            const documentUri = vscode.Uri.parse(entry.resource);
+            const fileUris = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                defaultUri: this.getParentUri(documentUri),
+                filters: {
+                    'GaussianViewer Viewpoint': ['json'],
+                    'All Files': ['*']
+                }
+            });
+            const viewpointUri = fileUris?.[0];
+            if (!viewpointUri) {
+                return;
+            }
+            const bytes = await vscode.workspace.fs.readFile(viewpointUri);
+            const json = JSON.parse(Buffer.from(bytes).toString('utf8'));
+            await this.applyViewpoint(entry.webviewPanel, json);
+            vscode.window.showInformationMessage(`Viewpoint loaded: ${path.basename(viewpointUri.fsPath || viewpointUri.path)}`);
+        }
+        catch (error) {
+            vscode.window.showErrorMessage(`Failed to load viewpoint: ${error.message || String(error)}`);
+        }
+    }
+    async startCinematicOrbit() {
+        const entry = this.getActiveWebviewEntry();
+        if (!entry) {
+            return;
+        }
+        const preset = await vscode.window.showQuickPick([
+            { label: 'Turntable', description: 'Normal 15 second loop', mode: 'turntable', durationMs: 15000 },
+            { label: 'Reverse', description: 'Normal loop in the opposite direction', mode: 'reverse', durationMs: 15000 },
+            { label: 'Dolly Orbit', description: 'Orbit with subtle zoom breathing', mode: 'dolly', durationMs: 18000 },
+            { label: 'Bob Orbit', description: 'Orbit with a subtle vertical move', mode: 'bob', durationMs: 18000 },
+            { label: 'Sway', description: 'Back-and-forth camera swing', mode: 'sway', durationMs: 12000 }
+        ], {
+            placeHolder: 'Choose cinematic orbit mode'
+        });
+        if (!preset) {
+            return;
+        }
+        entry.webviewPanel.webview.postMessage({
+            type: 'camera/orbit/start',
+            mode: preset.mode,
+            durationMs: preset.durationMs
+        });
+        vscode.window.showInformationMessage(`Cinematic orbit started: ${preset.label}`);
+    }
+    stopCinematicOrbit() {
+        const entry = this.getActiveWebviewEntry();
+        if (!entry) {
+            return;
+        }
+        entry.webviewPanel.webview.postMessage({ type: 'camera/orbit/stop' });
+        vscode.window.showInformationMessage('Cinematic orbit stopped.');
+    }
+    isPLYFile(filePath) {
+        return path.extname(filePath).toLowerCase() === '.ply';
+    }
+    getLargeFileThresholdBytes() {
+        const config = vscode.workspace.getConfiguration("supersplat.performance");
+        const thresholdMB = Math.max(1, config.get("largeFileThreshold", 10));
+        return thresholdMB * 1024 * 1024;
+    }
+    async openCustomDocument(uri, openContext, token) {
+        this.logPerformance(`Opening document: ${uri.fsPath}`);
+        if (this.isPLYFile(uri.fsPath)) {
+            try {
+                const optimizedPath = await this.plyOptimizer.optimizePLY(uri.fsPath);
+                this.optimizedPaths.set(uri.toString(), optimizedPath);
+                this.logPerformance(`Optimized path for ${uri.fsPath}: ${optimizedPath}`);
+            }
+            catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                this.logPerformance(`Error optimizing PLY ${uri.fsPath}: ${errorMessage}`);
+                vscode.window.showErrorMessage(`Failed to optimize PLY file: ${errorMessage}`);
+                this.optimizedPaths.set(uri.toString(), uri.fsPath);
+            }
+        }
+        else {
+            this.logPerformance(`Skipping PLY optimization for non-PLY file: ${uri.fsPath}`);
             this.optimizedPaths.set(uri.toString(), uri.fsPath);
         }
         const document = await supersplatDocument_1.SuperSplatDocument.create(uri, openContext.backupId, {
             getFileData: async () => {
-                const maxInMemorySize = 0x7fffffff; // ~2GB buffer limit
+                const maxInMemorySize = Math.min(0x7fffffff, this.getLargeFileThresholdBytes());
                 const stat = await vscode.workspace.fs.stat(uri);
                 if (stat.size > maxInMemorySize) {
                     this.logPerformance(`[OPEN] Skipping full in-memory read for very large file (${(stat.size / (1024 * 1024)).toFixed(2)} MB)`);
-                    vscode.window.showWarningMessage('파일이 매우 커서 전체를 메모리에 올리지 않고 스트리밍 모드로 엽니다.');
                     return new Uint8Array();
                 }
                 const fileData = await vscode.workspace.fs.readFile(uri);
@@ -145,6 +395,11 @@ class OptimizedSuperSplatProvider {
             const watcher = vscode.workspace.createFileSystemWatcher(document.uri.fsPath, true, false, true);
             watcher.onDidChange(async () => {
                 this.logPerformance(`File changed, re-optimizing: ${document.uri.fsPath}`);
+                if (!this.isPLYFile(document.uri.fsPath)) {
+                    this.optimizedPaths.set(document.uri.toString(), document.uri.fsPath);
+                    webviewPanel.webview.postMessage({ type: "modelRefresh" });
+                    return;
+                }
                 try {
                     const newOptimizedPath = await this.plyOptimizer.optimizePLY(document.uri.fsPath);
                     this.optimizedPaths.set(document.uri.toString(), newOptimizedPath);
@@ -211,6 +466,227 @@ class OptimizedSuperSplatProvider {
             case "importRemote":
                 this.handleImportRemote(document, webviewPanel, message);
                 return;
+            case "overlay/open":
+                this.handleOverlayOpen(document, webviewPanel, message);
+                return;
+            case "overlay/cancel":
+                if (message.requestId) {
+                    this.cancelledOverlayRequests.add(message.requestId);
+                }
+                return;
+        }
+    }
+
+    detectColmapFormat(dirPath) {
+        const stems = ['cameras', 'images', 'points3D'];
+        const hasFormat = (ext) => stems.every(stem => fs.existsSync(path.join(dirPath, `${stem}.${ext}`)));
+        if (hasFormat('bin')) {
+            return 'bin';
+        }
+        if (hasFormat('txt')) {
+            return 'txt';
+        }
+        return null;
+    }
+
+    findColmapModelDirs(rootPath) {
+        const found = [];
+        const seen = new Set();
+        const isDir = (dirPath) => {
+            try {
+                return fs.statSync(dirPath).isDirectory();
+            }
+            catch {
+                return false;
+            }
+        };
+        const consider = (dirPath) => {
+            const resolved = path.resolve(dirPath);
+            if (seen.has(resolved) || !isDir(resolved)) {
+                return;
+            }
+            seen.add(resolved);
+            if (this.detectColmapFormat(resolved)) {
+                found.push(resolved);
+            }
+        };
+        const considerChildren = (dirPath) => {
+            if (!isDir(dirPath)) {
+                return;
+            }
+            for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+                if (entry.isDirectory()) {
+                    consider(path.join(dirPath, entry.name));
+                }
+            }
+        };
+        consider(rootPath);
+        considerChildren(rootPath);
+        const sparsePath = path.join(rootPath, 'sparse');
+        consider(sparsePath);
+        considerChildren(sparsePath);
+        return found;
+    }
+
+    async checkOverlayCancelled(webviewPanel, requestId) {
+        if (requestId && this.cancelledOverlayRequests.has(requestId)) {
+            this.cancelledOverlayRequests.delete(requestId);
+            await webviewPanel.webview.postMessage({
+                type: 'overlay/file',
+                requestId,
+                success: false,
+                cancelled: true
+            });
+            return true;
+        }
+        return false;
+    }
+
+    async handleColmapOverlayOpen(document, webviewPanel, message, defaultUri) {
+        const folderUris = await vscode.window.showOpenDialog({
+            canSelectFiles: false,
+            canSelectFolders: true,
+            canSelectMany: false,
+            openLabel: 'Add COLMAP Sparse Overlay',
+            title: 'Select a COLMAP project, sparse, or sparse/0 folder',
+            defaultUri
+        });
+        if (await this.checkOverlayCancelled(webviewPanel, message.requestId)) {
+            return;
+        }
+        const folderUri = folderUris?.[0];
+        if (!folderUri) {
+            await webviewPanel.webview.postMessage({
+                type: 'overlay/file',
+                requestId: message.requestId,
+                success: false,
+                cancelled: true
+            });
+            return;
+        }
+        const modelDirs = this.findColmapModelDirs(folderUri.fsPath);
+        if (modelDirs.length === 0) {
+            throw new Error('No COLMAP sparse model found. Expected cameras/images/points3D as .bin or .txt.');
+        }
+        let modelDir = modelDirs[0];
+        if (modelDirs.length > 1) {
+            const selected = await vscode.window.showQuickPick(modelDirs.map(dirPath => ({
+                label: path.relative(folderUri.fsPath, dirPath) || path.basename(dirPath),
+                description: dirPath,
+                dirPath
+            })), {
+                placeHolder: 'Multiple COLMAP models found. Select one to overlay.'
+            });
+            if (await this.checkOverlayCancelled(webviewPanel, message.requestId)) {
+                return;
+            }
+            if (!selected) {
+                await webviewPanel.webview.postMessage({
+                    type: 'overlay/file',
+                    requestId: message.requestId,
+                    success: false,
+                    cancelled: true
+                });
+                return;
+            }
+            modelDir = selected.dirPath;
+        }
+        const format = this.detectColmapFormat(modelDir);
+        if (!format) {
+            throw new Error('Selected COLMAP folder is incomplete.');
+        }
+        const maxBytes = 300 * 1024 * 1024;
+        const readPart = async (stem) => {
+            const filePath = path.join(modelDir, `${stem}.${format}`);
+            const fileUri = vscode.Uri.file(filePath);
+            const stats = await vscode.workspace.fs.stat(fileUri);
+            if (stats.size > maxBytes) {
+                throw new Error(`${stem}.${format} is ${(stats.size / (1024 * 1024)).toFixed(1)}MB. Current COLMAP overlay limit is 300MB per file.`);
+            }
+            const bytes = await vscode.workspace.fs.readFile(fileUri);
+            return {
+                name: `${stem}.${format}`,
+                byteLength: stats.size,
+                bytes: new Uint8Array(bytes)
+            };
+        };
+        const files = {
+            cameras: await readPart('cameras'),
+            images: await readPart('images'),
+            points3D: await readPart('points3D')
+        };
+        if (await this.checkOverlayCancelled(webviewPanel, message.requestId)) {
+            return;
+        }
+        await webviewPanel.webview.postMessage({
+            type: 'overlay/file',
+            requestId: message.requestId,
+            success: true,
+            kind: 'colmap',
+            filename: path.basename(modelDir),
+            format,
+            files
+        });
+    }
+
+    async handleOverlayOpen(document, webviewPanel, message) {
+        try {
+            const kind = message.kind === 'mesh' ? 'mesh' : (message.kind === 'colmap' ? 'colmap' : 'points');
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            const defaultUri = workspaceFolders?.[0]?.uri || this.getParentUri(document.uri);
+            if (kind === 'colmap') {
+                await this.handleColmapOverlayOpen(document, webviewPanel, message, defaultUri);
+                return;
+            }
+            const filters = kind === 'mesh'
+                ? { 'OBJ Mesh': ['obj'], 'All Files': ['*'] }
+                : { 'Point Cloud': ['ply', 'bin', 'xyz', 'txt', 'csv'], 'All Files': ['*'] };
+            const fileUris = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                openLabel: kind === 'mesh' ? 'Add Mesh Overlay' : 'Add Point Overlay',
+                defaultUri,
+                filters
+            });
+            if (await this.checkOverlayCancelled(webviewPanel, message.requestId)) {
+                return;
+            }
+            const fileUri = fileUris?.[0];
+            if (!fileUri) {
+                webviewPanel.webview.postMessage({
+                    type: 'overlay/file',
+                    requestId: message.requestId,
+                    success: false,
+                    cancelled: true
+                });
+                return;
+            }
+            const stats = await vscode.workspace.fs.stat(fileUri);
+            const maxOverlayBytes = 300 * 1024 * 1024;
+            if (stats.size > maxOverlayBytes) {
+                throw new Error(`Overlay file is ${(stats.size / (1024 * 1024)).toFixed(1)}MB. Current overlay loader limit is 300MB.`);
+            }
+            const bytes = await vscode.workspace.fs.readFile(fileUri);
+            if (await this.checkOverlayCancelled(webviewPanel, message.requestId)) {
+                return;
+            }
+            webviewPanel.webview.postMessage({
+                type: 'overlay/file',
+                requestId: message.requestId,
+                success: true,
+                kind,
+                filename: path.basename(fileUri.fsPath || fileUri.path),
+                byteLength: stats.size,
+                bytes: new Uint8Array(bytes)
+            });
+        }
+        catch (error) {
+            webviewPanel.webview.postMessage({
+                type: 'overlay/file',
+                requestId: message.requestId,
+                success: false,
+                error: error.message || String(error)
+            });
+            vscode.window.showErrorMessage(`Failed to add overlay: ${error.message || String(error)}`);
         }
     }
     
@@ -614,16 +1090,6 @@ class OptimizedSuperSplatProvider {
             fileSizeMB: fileSizeMB
         });
         
-        // For files > 1GB, don't auto-start streaming here since it will be handled by requestStreamingFallback
-        if (fileSizeMB > 500 && fileSizeMB <= 1000) { 
-            // Only auto-start streaming for files between 500MB and 1GB
-            webviewPanel.webview.postMessage({
-                type: 'startStreaming',
-                fileSize: stats.size,
-                chunkSize: 10 * 1024 * 1024, // 10MB chunks for faster processing
-                filename: fileName
-            });
-        }
         this.logPerformance(`[VSCode] Webview is ready for document: ${document.uri.fsPath}`);
     }
     getSettings(webview, document) {
@@ -634,7 +1100,7 @@ class OptimizedSuperSplatProvider {
         const optimizedStats = fs.statSync(optimizedPath);
         const optimizedFileSizeMB = optimizedStats.size / (1024 * 1024);
         
-        // For large files (>500MB), don't set fileToLoad to prevent direct loading attempts
+        // Large remote files need explicit streaming progress; keep direct URLs for smaller files.
         const shouldUseStreaming = optimizedFileSizeMB > 500;
         
         const initialData = {
@@ -1292,6 +1758,18 @@ class WebviewCollection {
         webviewPanel.onDidDispose(() => {
             this._webviews.delete(entry);
         });
+    }
+    getActiveOrVisible() {
+        let visibleEntry;
+        for (const entry of this._webviews) {
+            if (entry.webviewPanel.active) {
+                return entry;
+            }
+            if (entry.webviewPanel.visible) {
+                visibleEntry = entry;
+            }
+        }
+        return visibleEntry;
     }
 }
 //# sourceMappingURL=optimizedSupersplatProvider.js.map

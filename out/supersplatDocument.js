@@ -44,7 +44,9 @@ class SuperSplatDocument {
     _emitter = new vscode.EventEmitter();
     static async create(uri, backupId, delegate) {
         const dataFile = typeof backupId === "string" ? vscode.Uri.parse(backupId) : uri;
-        const fileData = await SuperSplatDocument.readFile(dataFile);
+        const fileData = delegate?.getFileData
+            ? await delegate.getFileData()
+            : await SuperSplatDocument.readFile(dataFile);
         return new SuperSplatDocument(uri, fileData);
     }
     static async readFile(uri) {

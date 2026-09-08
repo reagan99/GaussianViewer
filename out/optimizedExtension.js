@@ -60,21 +60,37 @@ function activate(context) {
             performanceConfig.optimizeCurrentFile();
         }),
         vscode.commands.registerCommand('supersplat.performance.preloadFile', async (uri) => {
-            if (uri && uri.fsPath.toLowerCase().endsWith('.ply')) {
-                try {
-                    await vscode.window.withProgress({
-                        location: vscode.ProgressLocation.Notification,
-                        title: 'Preloading PLY file...',
-                        cancellable: false
-                    }, async (progress) => {
-                        progress.report({ message: 'Optimizing...' });
-                        await plyOptimizer.optimizePLY(uri.fsPath);
-                    });
-                    vscode.window.showInformationMessage('PLY file preloaded successfully.');
+            let fileUri = uri;
+            if (!fileUri) {
+                const activeFile = vscode.window.activeTextEditor?.document.uri;
+                if (activeFile?.fsPath?.toLowerCase().endsWith('.ply')) {
+                    fileUri = activeFile;
                 }
-                catch (error) {
-                    vscode.window.showErrorMessage(`Failed to preload file: ${error}`);
-                }
+            }
+            if (!fileUri) {
+                const selection = await vscode.window.showOpenDialog({
+                    canSelectMany: false,
+                    filters: { 'PLY Files': ['ply'] }
+                });
+                fileUri = selection?.[0];
+            }
+            if (!fileUri || !fileUri.fsPath.toLowerCase().endsWith('.ply')) {
+                vscode.window.showWarningMessage('No PLY file selected.');
+                return;
+            }
+            try {
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'Preloading PLY file...',
+                    cancellable: false
+                }, async (progress) => {
+                    progress.report({ message: 'Optimizing...' });
+                    await plyOptimizer.optimizePLY(fileUri.fsPath);
+                });
+                vscode.window.showInformationMessage('PLY file preloaded successfully.');
+            }
+            catch (error) {
+                vscode.window.showErrorMessage(`Failed to preload file: ${error}`);
             }
         }),
         vscode.commands.registerCommand('supersplat.performance.batchOptimize', async () => {
@@ -120,12 +136,14 @@ function activate(context) {
                 const config = vscode.workspace.getConfiguration('supersplat.performance');
                 await config.update('enableASCIIToBinaryConversion', undefined);
                 await config.update('enablePLYCaching', undefined);
+                await config.update('cacheMaxAge', undefined);
                 await config.update('largeFileThreshold', undefined);
                 await config.update('enableDirectUriTransfer', undefined);
                 await config.update('enablePerformanceLogging', undefined);
                 await config.update('enableBufferPooling', undefined);
                 await config.update('enableVertexCompression', undefined);
                 await config.update('enableLevelOfDetail', undefined);
+                await config.update('gcInterval', undefined);
                 await config.update('maxCacheSize', undefined);
                 vscode.window.showInformationMessage('Performance settings reset to defaults.');
             }
@@ -141,7 +159,7 @@ function activate(context) {
     const config = performanceConfig.getConfig();
     if (config.enableGarbageCollection) {
         const cleanupInterval = setInterval(() => {
-            plyOptimizer.clearCache(); // This could be made more intelligent
+            plyOptimizer.pruneCache(config.maxCacheSize, config.cacheMaxAge);
         }, config.gcInterval);
         context.subscriptions.push(new vscode.Disposable(() => {
             clearInterval(cleanupInterval);

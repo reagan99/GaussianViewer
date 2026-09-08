@@ -209,6 +209,10 @@
                 receivedChunks: 0,
                 totalSize: 0
             };
+            let cinematicOrbit = null;
+            let overlayRenderer = null;
+            let pendingOverlayRequest = null;
+            let cameraGlyphScale = 1;
 
             // Use both window message handler and VSCode API for communication
             window.addEventListener('message', event => {
@@ -238,11 +242,13 @@
                 console.log('🔍 [WEBVIEW] Available VSCode API methods:', Object.keys(vscode || {}));
             }
             
-            // Force streaming for ALL large files - NO LIMITS
-            if (finalSettings.useStreaming || finalSettings.fileSizeMB > 500) {
+            // Streaming is reserved for files that cannot be handled by direct webview URLs.
+            if (finalSettings.useStreaming) {
                 console.log('🚀 [FORCE] Loading large file:', finalSettings.fileSizeMB, 'MB - forcing streaming mode');
                 requestStreamingMode(finalSettings);
             }
+            createGaussianViewerToolbar();
+            installOrbitInteractionTracking();
             
             function getOptimalChunkSize(fileSize) {
                 const fileSizeMB = fileSize / (1024 * 1024);
@@ -411,6 +417,2048 @@
                     case 'fileError':
                         console.error('❌ [BASE64] File transfer error:', message.error);
                         break;
+
+                    case 'viewpoint/get':
+                        handleViewpointGet(message);
+                        break;
+
+                    case 'viewpoint/apply':
+                        handleViewpointApply(message);
+                        break;
+
+                    case 'camera/orbit/start':
+                        startCinematicOrbit(message);
+                        break;
+
+                    case 'camera/orbit/stop':
+                        stopCinematicOrbit();
+                        break;
+
+                    case 'overlay/file':
+                        handleOverlayFile(message);
+                        break;
+                }
+            }
+
+            function installOrbitInteractionTracking() {
+                let pointerAdjusting = false;
+                const markUserInput = (event) => {
+                    const toolbar = document.getElementById('gaussian-viewer-toolbar');
+                    if (event.target instanceof Node && toolbar?.contains(event.target)) {
+                        return;
+                    }
+                    if (cinematicOrbit) {
+                        cinematicOrbit.lastUserInput = performance.now();
+                    }
+                };
+
+                window.addEventListener('pointerdown', event => {
+                    pointerAdjusting = true;
+                    markUserInput(event);
+                }, true);
+                window.addEventListener('pointermove', event => {
+                    if (pointerAdjusting) {
+                        markUserInput(event);
+                    }
+                }, true);
+                window.addEventListener('pointerup', event => {
+                    pointerAdjusting = false;
+                    markUserInput(event);
+                }, true);
+                window.addEventListener('pointercancel', event => {
+                    pointerAdjusting = false;
+                    markUserInput(event);
+                }, true);
+                window.addEventListener('wheel', markUserInput, true);
+                window.addEventListener('keydown', markUserInput, true);
+            }
+
+            function createOverlayRequestId(kind) {
+                return `overlay-${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            }
+
+            function requestOverlayOpen(kind) {
+                if (!vscode?.postMessage) {
+                    console.error('VS Code API is not available for overlay loading.');
+                    return;
+                }
+                if (pendingOverlayRequest) {
+                    updateOverlayStatus('file picker already open');
+                    return;
+                }
+                const requestId = createOverlayRequestId(kind);
+                pendingOverlayRequest = { requestId, kind };
+                updateOverlayStatus(`choosing ${kind}...`);
+                updateOverlayButtons(true);
+                vscode.postMessage({
+                    type: 'overlay/open',
+                    requestId,
+                    kind
+                });
+            }
+
+            function cancelOverlayOpen() {
+                if (!pendingOverlayRequest) {
+                    updateOverlayStatus('no pending overlay');
+                    return;
+                }
+                vscode?.postMessage({
+                    type: 'overlay/cancel',
+                    requestId: pendingOverlayRequest.requestId
+                });
+                pendingOverlayRequest = null;
+                updateOverlayButtons(false);
+                updateOverlayStatus('overlay load cancelled');
+            }
+
+            async function handleOverlayFile(message) {
+                if (pendingOverlayRequest && message.requestId !== pendingOverlayRequest.requestId) {
+                    return;
+                }
+                pendingOverlayRequest = null;
+                updateOverlayButtons(false);
+                if (message.cancelled) {
+                    updateOverlayStatus('overlay load cancelled');
+                    return;
+                }
+                if (!message.success) {
+                    console.error('Overlay file load failed:', message.error);
+                    updateOverlayStatus('overlay load failed');
+                    return;
+                }
+                try {
+                    if (!overlayRenderer) {
+                        overlayRenderer = new GaussianViewerOverlayRenderer();
+                    }
+                    const overlays = message.kind === 'colmap'
+                        ? parseColmapReconstructionOverlay(message.filename, message.files, message.format)
+                        : [parseAuxiliaryOverlay(message.filename, toUint8Array(message.bytes), message.kind)];
+                    for (const overlay of overlays) {
+                        overlayRenderer.addOverlay(overlay);
+                    }
+                    updateOverlayCount();
+                    renderOverlayList();
+                    updateOverlayStatus(`loaded ${message.filename}`);
+                } catch (error) {
+                    console.error('Failed to parse overlay:', error);
+                    updateOverlayStatus('overlay parse failed');
+                    vscode?.postMessage({
+                        type: 'error',
+                        message: error.message || String(error)
+                    });
+                }
+            }
+
+            function clearOverlays() {
+                overlayRenderer?.clear();
+                updateOverlayCount();
+                renderOverlayList();
+                updateOverlayStatus('ready');
+            }
+
+            function updateCameraGlyphScale(value) {
+                const nextScale = Math.max(0.2, Math.min(3, Number(value) || 1));
+                cameraGlyphScale = nextScale;
+                overlayRenderer?.setCameraGlyphScale(nextScale);
+                updateOverlayStatus(`camera size ${nextScale.toFixed(2)}x`);
+            }
+
+            function updateOverlayCount() {
+                const countNode = document.querySelector('#gaussian-viewer-toolbar [data-role="overlay-count"]');
+                if (countNode) {
+                    const overlays = overlayRenderer?.listOverlays() || [];
+                    const visible = overlays.filter(overlay => overlay.visible).length;
+                    const total = overlays.length;
+                    countNode.textContent = total ? `${visible}/${total} overlays visible` : '0 overlays';
+                }
+            }
+
+            function renderOverlayList() {
+                const listNode = document.querySelector('#gaussian-viewer-toolbar [data-role="overlay-list"]');
+                if (!listNode) {
+                    return;
+                }
+                listNode.replaceChildren();
+                const overlays = overlayRenderer?.listOverlays() || [];
+                for (const overlay of overlays) {
+                    const row = document.createElement('label');
+                    row.className = 'gv-overlay-item';
+                    row.title = overlay.filename;
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = overlay.visible;
+                    checkbox.addEventListener('change', () => {
+                        overlayRenderer?.setOverlayVisible(overlay.id, checkbox.checked);
+                        updateOverlayCount();
+                        updateOverlayStatus(`${checkbox.checked ? 'shown' : 'hidden'} ${overlay.displayName || overlay.filename}`);
+                    });
+
+                    const name = document.createElement('span');
+                    name.className = 'gv-overlay-name';
+                    name.textContent = overlay.displayName || overlay.filename;
+
+                    const meta = document.createElement('span');
+                    meta.className = 'gv-overlay-meta';
+                    meta.textContent = overlaySummary(overlay);
+
+                    row.appendChild(checkbox);
+                    row.appendChild(name);
+                    row.appendChild(meta);
+                    listNode.appendChild(row);
+                }
+            }
+
+            function overlaySummary(overlay) {
+                const count = Number(overlay.displayCount ?? overlay.count ?? 0);
+                const label = overlay.displayKind || overlay.kind || 'items';
+                return `${formatCompactCount(count)} ${label}`;
+            }
+
+            function formatCompactCount(value) {
+                if (!Number.isFinite(value) || value <= 0) {
+                    return '0';
+                }
+                if (value >= 1000000) {
+                    return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`;
+                }
+                if (value >= 1000) {
+                    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k`;
+                }
+                return String(Math.round(value));
+            }
+
+            function updateOverlayStatus(text) {
+                const statusNode = document.querySelector('#gaussian-viewer-toolbar [data-role="overlay-status"]');
+                if (statusNode) {
+                    statusNode.textContent = text;
+                }
+            }
+
+            function updateOverlayButtons(isPending) {
+                document.querySelectorAll('#gaussian-viewer-toolbar [data-overlay-button]').forEach(button => {
+                    button.disabled = isPending;
+                });
+                const cancelButton = document.querySelector('#gaussian-viewer-toolbar [data-action="overlay-cancel"]');
+                if (cancelButton) {
+                    cancelButton.disabled = !isPending;
+                }
+            }
+
+            function createGaussianViewerToolbar() {
+                if (document.getElementById('gaussian-viewer-toolbar')) {
+                    return;
+                }
+
+                const style = document.createElement('style');
+                style.textContent = `
+                    #gaussian-viewer-toolbar {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 4px;
+                        padding: 5px 7px 6px;
+                        border-top: 1px solid rgba(255, 255, 255, 0.08);
+                        border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+                        background: #303030;
+                        font: 12px/1.2 "Helvetica Neue", Arial, Helvetica, sans-serif;
+                    }
+                    #gaussian-viewer-toolbar.gv-floating {
+                        position: fixed;
+                        top: 12px;
+                        right: 12px;
+                        z-index: 2147483647;
+                        width: 220px;
+                        border: 1px solid rgba(255, 255, 255, 0.18);
+                        border-radius: 8px;
+                        background: rgba(48, 48, 48, 0.9);
+                        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+                        backdrop-filter: blur(10px);
+                    }
+                    #gaussian-viewer-toolbar .gv-toolbar-title {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        color: #fff;
+                        font-weight: bold;
+                    }
+                    #gaussian-viewer-toolbar .gv-toolbar-row {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                    }
+                    #gaussian-viewer-toolbar .gv-compact-label {
+                        flex: 0 0 auto;
+                        color: #9ca3a6;
+                        font-size: 10px;
+                    }
+                    #gaussian-viewer-toolbar input[type="range"] {
+                        min-width: 0;
+                        flex: 1 1 auto;
+                        height: 16px;
+                    }
+                    #gaussian-viewer-toolbar button,
+                    #gaussian-viewer-toolbar select {
+                        height: 24px;
+                        border: 1px solid #202020;
+                        border-radius: 4px;
+                        background: #282828;
+                        color: #b3aaac;
+                        font: inherit;
+                    }
+                    #gaussian-viewer-toolbar button {
+                        width: 28px;
+                        flex: 0 0 28px;
+                        padding: 0;
+                        cursor: pointer;
+                    }
+                    #gaussian-viewer-toolbar button.gv-wide-button {
+                        width: auto;
+                        flex: 1 1 auto;
+                        padding: 0 5px;
+                    }
+                    #gaussian-viewer-toolbar button:hover,
+                    #gaussian-viewer-toolbar select:hover {
+                        color: #fff;
+                        background: #202020;
+                        box-shadow: 0 0 2px 1px rgba(255, 102, 0, 0.3);
+                    }
+                    #gaussian-viewer-toolbar button.active {
+                        color: #fff;
+                        border-color: #f60;
+                        background: rgba(255, 102, 0, 0.35);
+                    }
+                    #gaussian-viewer-toolbar button:disabled,
+                    #gaussian-viewer-toolbar select:disabled {
+                        opacity: 0.45;
+                        cursor: default;
+                        box-shadow: none;
+                    }
+                    #gaussian-viewer-toolbar select {
+                        min-width: 0;
+                        flex: 1 1 auto;
+                        padding: 0 4px;
+                    }
+                    #gaussian-viewer-toolbar select option {
+                        color: #111;
+                    }
+                    #gaussian-viewer-toolbar .gv-overlay-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 1px;
+                        max-height: 92px;
+                        overflow: auto;
+                    }
+                    #gaussian-viewer-toolbar .gv-overlay-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                        min-height: 18px;
+                        color: #d1d1d1;
+                        cursor: pointer;
+                    }
+                    #gaussian-viewer-toolbar .gv-overlay-item input {
+                        flex: 0 0 auto;
+                        margin: 0;
+                    }
+                    #gaussian-viewer-toolbar .gv-overlay-name {
+                        min-width: 0;
+                        flex: 1 1 auto;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                    }
+                    #gaussian-viewer-toolbar .gv-overlay-meta {
+                        flex: 0 0 auto;
+                        color: #8fa1a5;
+                        font-size: 10px;
+                    }
+                    #top-container,
+                    #tooltips-container,
+                    .panel,
+                    #scene-panel,
+                    #view-panel {
+                        z-index: 20;
+                    }
+                `;
+                document.head.appendChild(style);
+
+                const toolbar = document.createElement('div');
+                toolbar.id = 'gaussian-viewer-toolbar';
+                ['pointerdown', 'pointerup', 'pointermove', 'wheel', 'dblclick', 'click'].forEach((eventName) => {
+                    toolbar.addEventListener(eventName, event => event.stopPropagation());
+                });
+
+                const title = document.createElement('div');
+                title.className = 'gv-toolbar-title';
+                title.textContent = 'GaussianViewer';
+
+                const modeSelect = document.createElement('select');
+                modeSelect.title = 'Orbit type';
+                [
+                    ['turntable', 'Turntable'],
+                    ['reverse', 'Reverse'],
+                    ['dolly', 'Dolly Orbit'],
+                    ['bob', 'Bob Orbit'],
+                    ['sway', 'Sway']
+                ].forEach(([value, label]) => {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = label;
+                    modeSelect.appendChild(option);
+                });
+
+                const speedSelect = document.createElement('select');
+                speedSelect.title = 'Orbit speed';
+                [
+                    ['15000', 'Normal'],
+                    ['30000', 'Slow'],
+                    ['8000', 'Fast']
+                ].forEach(([value, label]) => {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = label;
+                    speedSelect.appendChild(option);
+                });
+
+                const controlsRow = document.createElement('div');
+                controlsRow.className = 'gv-toolbar-row';
+
+                const overlayRow = document.createElement('div');
+                overlayRow.className = 'gv-toolbar-row';
+
+                const cameraSizeRow = document.createElement('div');
+                cameraSizeRow.className = 'gv-toolbar-row';
+
+                const overlayCount = document.createElement('div');
+                overlayCount.dataset.role = 'overlay-count';
+                overlayCount.style.color = '#b3aaac';
+                overlayCount.style.fontSize = '10px';
+                overlayCount.textContent = '0 overlays';
+
+                const overlayStatus = document.createElement('div');
+                overlayStatus.dataset.role = 'overlay-status';
+                overlayStatus.style.color = '#829193';
+                overlayStatus.style.fontSize = '10px';
+                overlayStatus.textContent = 'ready';
+
+                const overlayList = document.createElement('div');
+                overlayList.dataset.role = 'overlay-list';
+                overlayList.className = 'gv-overlay-list';
+
+                const cameraSizeLabel = document.createElement('span');
+                cameraSizeLabel.className = 'gv-compact-label';
+                cameraSizeLabel.textContent = 'Cam';
+
+                const cameraSizeSlider = document.createElement('input');
+                cameraSizeSlider.type = 'range';
+                cameraSizeSlider.min = '0.2';
+                cameraSizeSlider.max = '3';
+                cameraSizeSlider.step = '0.05';
+                cameraSizeSlider.value = String(cameraGlyphScale);
+                cameraSizeSlider.title = 'COLMAP camera glyph size';
+                cameraSizeSlider.addEventListener('input', () => updateCameraGlyphScale(cameraSizeSlider.value));
+
+                const orbitButton = document.createElement('button');
+                orbitButton.type = 'button';
+                orbitButton.dataset.action = 'orbit';
+                orbitButton.textContent = '▶';
+                orbitButton.title = 'Start cinematic orbit';
+                orbitButton.addEventListener('click', () => {
+                    startCinematicOrbit({ mode: modeSelect.value, durationMs: Number(speedSelect.value) });
+                });
+
+                const stopButton = document.createElement('button');
+                stopButton.type = 'button';
+                stopButton.dataset.action = 'stop';
+                stopButton.textContent = '■';
+                stopButton.title = 'Stop cinematic orbit';
+                stopButton.addEventListener('click', () => {
+                    stopCinematicOrbit();
+                });
+
+                const addPointsButton = document.createElement('button');
+                addPointsButton.type = 'button';
+                addPointsButton.className = 'gv-wide-button';
+                addPointsButton.dataset.overlayButton = 'true';
+                addPointsButton.textContent = '+ Points';
+                addPointsButton.title = 'Add PLY/BIN/XYZ/TXT/CSV point overlay';
+                addPointsButton.addEventListener('click', () => requestOverlayOpen('points'));
+
+                const addMeshButton = document.createElement('button');
+                addMeshButton.type = 'button';
+                addMeshButton.className = 'gv-wide-button';
+                addMeshButton.dataset.overlayButton = 'true';
+                addMeshButton.textContent = '+ Mesh';
+                addMeshButton.title = 'Add OBJ mesh overlay';
+                addMeshButton.addEventListener('click', () => requestOverlayOpen('mesh'));
+
+                const addColmapButton = document.createElement('button');
+                addColmapButton.type = 'button';
+                addColmapButton.className = 'gv-wide-button';
+                addColmapButton.dataset.overlayButton = 'true';
+                addColmapButton.textContent = '+ COLMAP';
+                addColmapButton.title = 'Add COLMAP sparse folder with points and cameras';
+                addColmapButton.addEventListener('click', () => requestOverlayOpen('colmap'));
+
+                const cancelOverlayButton = document.createElement('button');
+                cancelOverlayButton.type = 'button';
+                cancelOverlayButton.textContent = 'Cancel';
+                cancelOverlayButton.className = 'gv-wide-button';
+                cancelOverlayButton.dataset.action = 'overlay-cancel';
+                cancelOverlayButton.disabled = true;
+                cancelOverlayButton.title = 'Cancel pending overlay load';
+                cancelOverlayButton.addEventListener('click', cancelOverlayOpen);
+
+                const clearOverlayButton = document.createElement('button');
+                clearOverlayButton.type = 'button';
+                clearOverlayButton.textContent = '×';
+                clearOverlayButton.title = 'Clear overlays';
+                clearOverlayButton.addEventListener('click', clearOverlays);
+
+                speedSelect.addEventListener('change', () => {
+                    if (cinematicOrbit) {
+                        startCinematicOrbit({ mode: modeSelect.value, durationMs: Number(speedSelect.value) });
+                    }
+                });
+
+                modeSelect.addEventListener('change', () => {
+                    if (cinematicOrbit) {
+                        startCinematicOrbit({ mode: modeSelect.value, durationMs: Number(speedSelect.value) });
+                    }
+                });
+
+                controlsRow.appendChild(modeSelect);
+                controlsRow.appendChild(speedSelect);
+                controlsRow.appendChild(orbitButton);
+                controlsRow.appendChild(stopButton);
+                overlayRow.appendChild(addPointsButton);
+                overlayRow.appendChild(addMeshButton);
+                overlayRow.appendChild(addColmapButton);
+                overlayRow.appendChild(cancelOverlayButton);
+                overlayRow.appendChild(clearOverlayButton);
+                cameraSizeRow.appendChild(cameraSizeLabel);
+                cameraSizeRow.appendChild(cameraSizeSlider);
+                toolbar.appendChild(title);
+                toolbar.appendChild(controlsRow);
+                toolbar.appendChild(overlayRow);
+                toolbar.appendChild(cameraSizeRow);
+                toolbar.appendChild(overlayCount);
+                toolbar.appendChild(overlayList);
+                toolbar.appendChild(overlayStatus);
+
+                const attachToScenePanel = () => {
+                    const scenePanel = document.getElementById('scene-panel');
+                    if (!scenePanel) {
+                        return false;
+                    }
+                    toolbar.classList.remove('gv-floating');
+                    const firstContent = scenePanel.children[1] || null;
+                    scenePanel.insertBefore(toolbar, firstContent);
+                    return true;
+                };
+
+                if (!attachToScenePanel()) {
+                    toolbar.classList.add('gv-floating');
+                    document.body.appendChild(toolbar);
+                    const startTime = Date.now();
+                    const timer = setInterval(() => {
+                        if (attachToScenePanel() || Date.now() - startTime > 10000) {
+                            clearInterval(timer);
+                        }
+                    }, 250);
+                }
+            }
+
+            function waitForSceneEvents(timeoutMs = 5000) {
+                if (window.scene && window.scene.events) {
+                    return Promise.resolve(window.scene.events);
+                }
+
+                return new Promise((resolve, reject) => {
+                    const startTime = Date.now();
+                    const timer = setInterval(() => {
+                        if (window.scene && window.scene.events) {
+                            clearInterval(timer);
+                            resolve(window.scene.events);
+                            return;
+                        }
+                        if (Date.now() - startTime > timeoutMs) {
+                            clearInterval(timer);
+                            reject(new Error('SuperSplat scene is not ready.'));
+                        }
+                    }, 100);
+                });
+            }
+
+            function toUint8Array(value) {
+                if (value instanceof Uint8Array) {
+                    return value;
+                }
+                if (value instanceof ArrayBuffer) {
+                    return new Uint8Array(value);
+                }
+                if (ArrayBuffer.isView(value)) {
+                    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+                }
+                if (Array.isArray(value)) {
+                    return new Uint8Array(value);
+                }
+                throw new Error('Unsupported overlay byte payload.');
+            }
+
+            function findHeaderEnd(bytes) {
+                const marker = new TextEncoder().encode('end_header');
+                for (let i = 0; i <= bytes.length - marker.length; i++) {
+                    let matched = true;
+                    for (let j = 0; j < marker.length; j++) {
+                        if (bytes[i + j] !== marker[j]) {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if (matched) {
+                        let end = i + marker.length;
+                        while (end < bytes.length && (bytes[end] === 10 || bytes[end] === 13)) {
+                            end++;
+                        }
+                        return end;
+                    }
+                }
+                return -1;
+            }
+
+            function parseAuxiliaryOverlay(filename, bytes, kind) {
+                const lowerName = filename.toLowerCase();
+                if (kind === 'mesh' || lowerName.endsWith('.obj')) {
+                    return parseObjOverlay(filename, new TextDecoder().decode(bytes));
+                }
+                if (lowerName.endsWith('.bin')) {
+                    return parseColmapPoints3DBinOverlay(filename, bytes);
+                }
+                if (lowerName.endsWith('.ply')) {
+                    return parsePlyPointOverlay(filename, bytes);
+                }
+                return parseTextPointOverlay(filename, new TextDecoder().decode(bytes));
+            }
+
+            function makePointOverlay(filename, positions, colors = null, pointSize = 2.5) {
+                return {
+                    kind: 'points',
+                    filename,
+                    displayName: filename,
+                    positions: alignOverlayPositions(positions),
+                    colors,
+                    count: positions.length / 3,
+                    displayCount: positions.length / 3,
+                    displayKind: 'pts',
+                    pointSize,
+                    visible: true
+                };
+            }
+
+            function normalizeColorChannel(value) {
+                const number = Number(value);
+                if (!Number.isFinite(number)) {
+                    return 1;
+                }
+                return Math.max(0, Math.min(1, number <= 1 ? number : number / 255));
+            }
+
+            function makeMeshOverlay(filename, linePositions) {
+                return {
+                    kind: 'mesh',
+                    filename,
+                    displayName: filename,
+                    positions: alignOverlayPositions(linePositions),
+                    count: linePositions.length / 3,
+                    displayCount: linePositions.length / 6,
+                    displayKind: 'edges',
+                    uniformColor: [1.0, 0.55, 0.08],
+                    visible: true
+                };
+            }
+
+            function makeLineOverlay(filename, linePositions, uniformColor = [0.35, 0.66, 1.0], cameraViews = null, cameraCenters = null) {
+                const isCameraOverlay = Array.isArray(cameraViews);
+                return {
+                    kind: 'mesh',
+                    filename,
+                    displayName: filename,
+                    positions: alignOverlayPositions(linePositions),
+                    cameraCenters: cameraCenters ? alignOverlayPositions(cameraCenters) : null,
+                    count: linePositions.length / 3,
+                    displayCount: isCameraOverlay ? cameraViews.length : linePositions.length / 6,
+                    displayKind: isCameraOverlay ? 'cams' : 'edges',
+                    uniformColor,
+                    cameraViews,
+                    visible: true
+                };
+            }
+
+            function alignOverlayPositions(positions) {
+                const aligned = new Float32Array(positions.length);
+                for (let i = 0; i < positions.length; i += 3) {
+                    aligned[i] = -positions[i];
+                    aligned[i + 1] = -positions[i + 1];
+                    aligned[i + 2] = positions[i + 2];
+                }
+                return aligned;
+            }
+
+            function alignOverlayVec3(v) {
+                return { x: -v[0], y: -v[1], z: v[2] };
+            }
+
+            function readUint64AsNumber(view, offset) {
+                if (typeof view.getBigUint64 === 'function') {
+                    const value = view.getBigUint64(offset, true);
+                    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+                        throw new Error('COLMAP binary value exceeds JavaScript safe integer range.');
+                    }
+                    return Number(value);
+                }
+                const lo = view.getUint32(offset, true);
+                const hi = view.getUint32(offset + 4, true);
+                return hi * 4294967296 + lo;
+            }
+
+            function parseColmapPoints3DBinOverlay(filename, bytes) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                if (view.byteLength < 8) {
+                    throw new Error('Invalid COLMAP points3D.bin: file is too small.');
+                }
+
+                const pointCount = readUint64AsNumber(view, 0);
+                if (!Number.isFinite(pointCount) || pointCount <= 0) {
+                    throw new Error('COLMAP points3D.bin has no points.');
+                }
+
+                const maxPoints = 1500000;
+                const sampleStride = Math.max(1, Math.ceil(pointCount / maxPoints));
+                const positions = [];
+                const colors = [];
+                let offset = 8;
+
+                for (let pointIndex = 0; pointIndex < pointCount; pointIndex++) {
+                    const fixedBytes = 8 + 24 + 3 + 8 + 8;
+                    if (offset + fixedBytes > view.byteLength) {
+                        break;
+                    }
+
+                    offset += 8; // POINT3D_ID
+                    const x = view.getFloat64(offset, true); offset += 8;
+                    const y = view.getFloat64(offset, true); offset += 8;
+                    const z = view.getFloat64(offset, true); offset += 8;
+                    const r = view.getUint8(offset++);
+                    const g = view.getUint8(offset++);
+                    const b = view.getUint8(offset++);
+                    offset += 8; // ERROR
+                    const trackLength = readUint64AsNumber(view, offset);
+                    offset += 8;
+
+                    if (pointIndex % sampleStride === 0 && Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                        positions.push(x, y, z);
+                        colors.push(r / 255, g / 255, b / 255);
+                    }
+
+                    const trackBytes = trackLength * 8; // IMAGE_ID int32 + POINT2D_IDX int32
+                    if (offset + trackBytes > view.byteLength) {
+                        break;
+                    }
+                    offset += trackBytes;
+                }
+
+                if (positions.length === 0) {
+                    throw new Error('No point coordinates found in COLMAP points3D.bin.');
+                }
+                return makePointOverlay(filename, new Float32Array(positions), new Float32Array(colors), 2.0);
+            }
+
+            function parseColmapReconstructionOverlay(filename, files, format) {
+                const actualFormat = format === 'txt' ? 'txt' : 'bin';
+                const camerasBytes = toUint8Array(files?.cameras?.bytes);
+                const imagesBytes = toUint8Array(files?.images?.bytes);
+                const pointsBytes = toUint8Array(files?.points3D?.bytes);
+                const cameras = actualFormat === 'txt'
+                    ? parseColmapCamerasText(new TextDecoder().decode(camerasBytes))
+                    : parseColmapCamerasBin(camerasBytes);
+                const images = actualFormat === 'txt'
+                    ? parseColmapImagesText(new TextDecoder().decode(imagesBytes))
+                    : parseColmapImagesBin(imagesBytes);
+                const pointOverlay = actualFormat === 'txt'
+                    ? parseTextPointOverlay(`${filename}/points3D.txt`, new TextDecoder().decode(pointsBytes))
+                    : parseColmapPoints3DBinOverlay(`${filename}/points3D.bin`, pointsBytes);
+                pointOverlay.filename = `${filename} points`;
+                pointOverlay.displayName = 'Points';
+                const overlays = [pointOverlay];
+                const cameraOverlay = buildColmapCameraFrustumOverlay(`${filename} cameras`, cameras, images, pointOverlay.positions);
+                if (cameraOverlay) {
+                    cameraOverlay.displayName = 'Cameras';
+                    overlays.push(cameraOverlay);
+                }
+                return overlays;
+            }
+
+            function parseColmapCamerasBin(bytes) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                const cameras = new Map();
+                const paramsPerModel = {
+                    0: 3,
+                    1: 4,
+                    2: 4,
+                    3: 5,
+                    4: 8,
+                    5: 8,
+                    6: 12,
+                    7: 5,
+                    8: 4,
+                    9: 5,
+                    10: 12
+                };
+                let offset = 0;
+                const count = readUint64AsNumber(view, offset);
+                offset += 8;
+                for (let i = 0; i < count; i++) {
+                    if (offset + 24 > view.byteLength) {
+                        break;
+                    }
+                    const cameraId = view.getUint32(offset, true); offset += 4;
+                    const model = view.getInt32(offset, true); offset += 4;
+                    const width = readUint64AsNumber(view, offset); offset += 8;
+                    const height = readUint64AsNumber(view, offset); offset += 8;
+                    const paramCount = paramsPerModel[model];
+                    if (paramCount === undefined) {
+                        throw new Error(`Unknown COLMAP camera model id: ${model}.`);
+                    }
+                    if (offset + paramCount * 8 > view.byteLength) {
+                        break;
+                    }
+                    const params = [];
+                    for (let p = 0; p < paramCount; p++) {
+                        params.push(view.getFloat64(offset, true));
+                        offset += 8;
+                    }
+                    cameras.set(cameraId, makeColmapCamera(cameraId, model, width, height, params));
+                }
+                return cameras;
+            }
+
+            function parseColmapCamerasText(text) {
+                const cameras = new Map();
+                const modelNameToId = {
+                    SIMPLE_PINHOLE: 0,
+                    PINHOLE: 1,
+                    SIMPLE_RADIAL: 2,
+                    RADIAL: 3,
+                    OPENCV: 4,
+                    OPENCV_FISHEYE: 5,
+                    FULL_OPENCV: 6,
+                    FOV: 7,
+                    SIMPLE_RADIAL_FISHEYE: 8,
+                    RADIAL_FISHEYE: 9,
+                    THIN_PRISM_FISHEYE: 10
+                };
+                for (const rawLine of text.split(/\r?\n/)) {
+                    const line = rawLine.trim();
+                    if (!line || line.startsWith('#')) {
+                        continue;
+                    }
+                    const tokens = line.split(/\s+/);
+                    const cameraId = Number(tokens[0]);
+                    const model = modelNameToId[tokens[1]];
+                    const width = Number(tokens[2]);
+                    const height = Number(tokens[3]);
+                    const params = tokens.slice(4).map(Number);
+                    if (Number.isInteger(cameraId) && model !== undefined && Number.isFinite(width) && Number.isFinite(height)) {
+                        cameras.set(cameraId, makeColmapCamera(cameraId, model, width, height, params));
+                    }
+                }
+                return cameras;
+            }
+
+            function makeColmapCamera(cameraId, model, width, height, params) {
+                const singleFocalModels = new Set([0, 2, 3, 7, 8, 9]);
+                const fx = singleFocalModels.has(model) ? params[0] : params[0];
+                const fy = singleFocalModels.has(model) ? params[0] : params[1];
+                const cx = singleFocalModels.has(model) ? params[1] : params[2];
+                const cy = singleFocalModels.has(model) ? params[2] : params[3];
+                return { cameraId, model, width, height, params, fx, fy, cx, cy };
+            }
+
+            function parseColmapImagesBin(bytes) {
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                const images = [];
+                let offset = 0;
+                const count = readUint64AsNumber(view, offset);
+                offset += 8;
+                for (let i = 0; i < count; i++) {
+                    if (offset + 64 > view.byteLength) {
+                        break;
+                    }
+                    const imageId = view.getUint32(offset, true); offset += 4;
+                    const qvec = [
+                        view.getFloat64(offset, true),
+                        view.getFloat64(offset + 8, true),
+                        view.getFloat64(offset + 16, true),
+                        view.getFloat64(offset + 24, true)
+                    ];
+                    offset += 32;
+                    const tvec = [
+                        view.getFloat64(offset, true),
+                        view.getFloat64(offset + 8, true),
+                        view.getFloat64(offset + 16, true)
+                    ];
+                    offset += 24;
+                    const cameraId = view.getUint32(offset, true);
+                    offset += 4;
+                    const nameResult = readCString(view, offset);
+                    const name = nameResult.value;
+                    offset = nameResult.offset;
+                    if (offset + 8 > view.byteLength) {
+                        break;
+                    }
+                    const point2DCount = readUint64AsNumber(view, offset);
+                    offset += 8 + point2DCount * 24;
+                    images.push({ imageId, qvec, tvec, cameraId, name });
+                    if (offset > view.byteLength) {
+                        break;
+                    }
+                }
+                return images;
+            }
+
+            function parseColmapImagesText(text) {
+                const images = [];
+                let expectPoseLine = true;
+                for (const rawLine of text.split(/\r?\n/)) {
+                    const line = rawLine.trim();
+                    if (!line || line.startsWith('#')) {
+                        continue;
+                    }
+                    if (!expectPoseLine) {
+                        expectPoseLine = true;
+                        continue;
+                    }
+                    const tokens = line.split(/\s+/);
+                    if (tokens.length >= 10) {
+                        images.push({
+                            imageId: Number(tokens[0]),
+                            qvec: [Number(tokens[1]), Number(tokens[2]), Number(tokens[3]), Number(tokens[4])],
+                            tvec: [Number(tokens[5]), Number(tokens[6]), Number(tokens[7])],
+                            cameraId: Number(tokens[8]),
+                            name: tokens.slice(9).join(' ')
+                        });
+                    }
+                    expectPoseLine = false;
+                }
+                return images;
+            }
+
+            function readCString(view, offset) {
+                const start = offset;
+                while (offset < view.byteLength && view.getUint8(offset) !== 0) {
+                    offset++;
+                }
+                const bytes = new Uint8Array(view.buffer, view.byteOffset + start, offset - start);
+                return {
+                    value: new TextDecoder().decode(bytes),
+                    offset: Math.min(offset + 1, view.byteLength)
+                };
+            }
+
+            function quaternionToRotation(qvec) {
+                let [w, x, y, z] = qvec;
+                const n = Math.hypot(w, x, y, z) || 1;
+                w /= n; x /= n; y /= n; z /= n;
+                const xx = x * x, yy = y * y, zz = z * z;
+                const xy = x * y, xz = x * z, yz = y * z;
+                const wx = w * x, wy = w * y, wz = w * z;
+                return [
+                    1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy),
+                    2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx),
+                    2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)
+                ];
+            }
+
+            function imageToColmapPose(image) {
+                const r = quaternionToRotation(image.qvec);
+                const rt = [r[0], r[3], r[6], r[1], r[4], r[7], r[2], r[5], r[8]];
+                const tx = -image.tvec[0], ty = -image.tvec[1], tz = -image.tvec[2];
+                return {
+                    center: [
+                        rt[0] * tx + rt[1] * ty + rt[2] * tz,
+                        rt[3] * tx + rt[4] * ty + rt[5] * tz,
+                        rt[6] * tx + rt[7] * ty + rt[8] * tz
+                    ],
+                    worldFromCamera: rt
+                };
+            }
+
+            function buildColmapCameraFrustumOverlay(filename, cameras, images, referencePositions) {
+                if (!cameras.size || images.length === 0) {
+                    return null;
+                }
+                const bounds = computePositionBounds(referencePositions);
+                const diagonal = bounds ? Math.hypot(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]) : 1;
+                const cameraSize = Math.max(diagonal * 0.001, 0.001);
+                const targetDistance = Math.max(diagonal * 0.15, cameraSize * 12);
+                const linePositions = [];
+                const cameraCenters = [];
+                const cameraViews = [];
+                const maxCameras = 20000;
+                const stride = Math.max(1, Math.ceil(images.length / maxCameras));
+                for (let i = 0; i < images.length; i += stride) {
+                    const image = images[i];
+                    const camera = cameras.get(image.cameraId);
+                    if (!camera || !Number.isFinite(camera.fx) || !Number.isFinite(camera.fy) || camera.fx === 0 || camera.fy === 0) {
+                        continue;
+                    }
+                    const pose = imageToColmapPose(image);
+                    const forward = [pose.worldFromCamera[2], pose.worldFromCamera[5], pose.worldFromCamera[8]];
+                    const alignedCenter = alignOverlayVec3(pose.center);
+                    const alignedForward = vec3Normalize(alignOverlayVec3(forward));
+                    const fovY = camera.fy > 0 ? 2 * Math.atan(camera.height / (2 * camera.fy)) * 180 / Math.PI : undefined;
+                    const startFloat = linePositions.length;
+                    pushColmapCameraGlyph(linePositions, pose, cameraSize);
+                    cameraCenters.push(...pose.center);
+                    cameraViews.push({
+                        name: image.name || `image ${image.imageId}`,
+                        center: alignedCenter,
+                        forward: alignedForward,
+                        targetDistance,
+                        fov: Number.isFinite(fovY) && fovY > 1 && fovY < 170 ? fovY : undefined,
+                        start: startFloat,
+                        count: linePositions.length - startFloat
+                    });
+                }
+                if (linePositions.length === 0) {
+                    return null;
+                }
+                return makeLineOverlay(filename, new Float32Array(linePositions), [1.0, 0.05, 0.85], cameraViews, new Float32Array(cameraCenters));
+            }
+
+            function pushColmapCameraGlyph(out, pose, size) {
+                const halfW = size * 0.45;
+                const halfH = size * 0.3;
+                const halfD = size * 0.18;
+                const lensHalf = size * 0.14;
+                const lensZ = size * 0.36;
+                const body = [
+                    [-halfW, -halfH, -halfD],
+                    [ halfW, -halfH, -halfD],
+                    [ halfW,  halfH, -halfD],
+                    [-halfW,  halfH, -halfD],
+                    [-halfW, -halfH,  halfD],
+                    [ halfW, -halfH,  halfD],
+                    [ halfW,  halfH,  halfD],
+                    [-halfW,  halfH,  halfD]
+                ].map(point => colmapCameraLocalToWorld(pose, point));
+                const lens = [
+                    [-lensHalf, -lensHalf, lensZ],
+                    [ lensHalf, -lensHalf, lensZ],
+                    [ lensHalf,  lensHalf, lensZ],
+                    [-lensHalf,  lensHalf, lensZ]
+                ].map(point => colmapCameraLocalToWorld(pose, point));
+                const bodyEdges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4]];
+                const lensEdges = [[0, 1], [1, 2], [2, 3], [3, 0]];
+                for (const [a, b] of bodyEdges) {
+                    pushLine(out, body[a], body[b]);
+                }
+                for (const [a, b] of lensEdges) {
+                    pushLine(out, lens[a], lens[b]);
+                }
+                pushLine(out, body[4], lens[0]);
+                pushLine(out, body[5], lens[1]);
+                pushLine(out, body[6], lens[2]);
+                pushLine(out, body[7], lens[3]);
+            }
+
+            function colmapCameraLocalToWorld(pose, local) {
+                const c = pose.center;
+                const m = pose.worldFromCamera;
+                const x = local[0], y = local[1], z = local[2];
+                return [
+                    c[0] + m[0] * x + m[1] * y + m[2] * z,
+                    c[1] + m[3] * x + m[4] * y + m[5] * z,
+                    c[2] + m[6] * x + m[7] * y + m[8] * z
+                ];
+            }
+
+            function colmapFrustumCorners(camera, pose, depth) {
+                const c = pose.center;
+                const m = pose.worldFromCamera;
+                const pixels = [
+                    [0, 0],
+                    [camera.width, 0],
+                    [camera.width, camera.height],
+                    [0, camera.height]
+                ];
+                return pixels.map(([u, v]) => {
+                    const x = ((u - camera.cx) / camera.fx) * depth;
+                    const y = ((v - camera.cy) / camera.fy) * depth;
+                    const z = depth;
+                    return [
+                        c[0] + m[0] * x + m[1] * y + m[2] * z,
+                        c[1] + m[3] * x + m[4] * y + m[5] * z,
+                        c[2] + m[6] * x + m[7] * y + m[8] * z
+                    ];
+                });
+            }
+
+            function pushLine(out, a, b) {
+                out.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+            }
+
+            function computePositionBounds(positions) {
+                if (!positions || positions.length < 3) {
+                    return null;
+                }
+                const min = [Infinity, Infinity, Infinity];
+                const max = [-Infinity, -Infinity, -Infinity];
+                for (let i = 0; i < positions.length; i += 3) {
+                    const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        continue;
+                    }
+                    min[0] = Math.min(min[0], x); min[1] = Math.min(min[1], y); min[2] = Math.min(min[2], z);
+                    max[0] = Math.max(max[0], x); max[1] = Math.max(max[1], y); max[2] = Math.max(max[2], z);
+                }
+                return Number.isFinite(min[0]) ? { min, max } : null;
+            }
+
+            function parseTextPointOverlay(filename, text) {
+                const maxPoints = 1500000;
+                const positions = [];
+                const colors = [];
+                const lines = text.split(/\r?\n/);
+                const stride = Math.max(1, Math.ceil(lines.length / maxPoints));
+
+                for (let lineIndex = 0; lineIndex < lines.length; lineIndex += stride) {
+                    const line = lines[lineIndex].trim();
+                    if (!line || line.startsWith('#') || line.startsWith('//')) {
+                        continue;
+                    }
+                    const tokens = line.split(/[,\s]+/).filter(Boolean);
+                    const values = tokens.map(Number);
+                    if (values.length < 3) {
+                        continue;
+                    }
+
+                    let xyzOffset = 0;
+                    let rgbOffset = 3;
+                    const looksLikeColmapPoint = values.length >= 8 &&
+                        Number.isInteger(values[0]) &&
+                        Number.isFinite(values[1]) &&
+                        Number.isFinite(values[2]) &&
+                        Number.isFinite(values[3]) &&
+                        values[4] >= 0 && values[4] <= 255 &&
+                        values[5] >= 0 && values[5] <= 255 &&
+                        values[6] >= 0 && values[6] <= 255;
+                    if (looksLikeColmapPoint) {
+                        xyzOffset = 1;
+                        rgbOffset = 4;
+                    }
+
+                    const x = values[xyzOffset];
+                    const y = values[xyzOffset + 1];
+                    const z = values[xyzOffset + 2];
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        continue;
+                    }
+                    positions.push(x, y, z);
+
+                    const r = values[rgbOffset];
+                    const g = values[rgbOffset + 1];
+                    const b = values[rgbOffset + 2];
+                    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+                        colors.push(normalizeColorChannel(r), normalizeColorChannel(g), normalizeColorChannel(b));
+                    } else {
+                        colors.push(0.1, 0.85, 1.0);
+                    }
+                }
+
+                if (positions.length === 0) {
+                    throw new Error('No point coordinates found in overlay file.');
+                }
+                return makePointOverlay(filename, new Float32Array(positions), new Float32Array(colors));
+            }
+
+            function parsePlyPointOverlay(filename, bytes) {
+                const headerEnd = findHeaderEnd(bytes);
+                if (headerEnd < 0) {
+                    throw new Error('Invalid PLY overlay: missing end_header.');
+                }
+
+                const headerText = new TextDecoder().decode(bytes.slice(0, headerEnd));
+                const lines = headerText.split(/\r?\n/);
+                const formatLine = lines.find(line => line.startsWith('format ')) || '';
+                const isAscii = formatLine.includes('ascii');
+                const isBinaryLittle = formatLine.includes('binary_little_endian');
+                if (!isAscii && !isBinaryLittle) {
+                    throw new Error('PLY overlay supports ascii and binary_little_endian only.');
+                }
+
+                let vertexCount = 0;
+                let inVertex = false;
+                const properties = [];
+                for (const line of lines) {
+                    const parts = line.trim().split(/\s+/);
+                    if (parts[0] === 'element') {
+                        inVertex = parts[1] === 'vertex';
+                        if (inVertex) {
+                            vertexCount = Number(parts[2]);
+                        }
+                    } else if (inVertex && parts[0] === 'property' && parts.length >= 3 && parts[1] !== 'list') {
+                        properties.push({ type: parts[1], name: parts[2] });
+                    }
+                }
+                if (!Number.isFinite(vertexCount) || vertexCount <= 0) {
+                    throw new Error('PLY overlay has no vertices.');
+                }
+
+                const maxPoints = 1500000;
+                const sampleStride = Math.max(1, Math.ceil(vertexCount / maxPoints));
+                const xIndex = properties.findIndex(p => p.name === 'x');
+                const yIndex = properties.findIndex(p => p.name === 'y');
+                const zIndex = properties.findIndex(p => p.name === 'z');
+                const rIndex = properties.findIndex(p => ['red', 'r', 'diffuse_red'].includes(p.name));
+                const gIndex = properties.findIndex(p => ['green', 'g', 'diffuse_green'].includes(p.name));
+                const bIndex = properties.findIndex(p => ['blue', 'b', 'diffuse_blue'].includes(p.name));
+                if (xIndex < 0 || yIndex < 0 || zIndex < 0) {
+                    throw new Error('PLY overlay needs x/y/z vertex properties.');
+                }
+
+                if (isAscii) {
+                    const body = new TextDecoder().decode(bytes.slice(headerEnd));
+                    const bodyLines = body.split(/\r?\n/);
+                    const positions = [];
+                    const colors = [];
+                    for (let i = 0; i < Math.min(vertexCount, bodyLines.length); i += sampleStride) {
+                        const values = bodyLines[i].trim().split(/\s+/).map(Number);
+                        if (values.length < properties.length) {
+                            continue;
+                        }
+                        const x = values[xIndex];
+                        const y = values[yIndex];
+                        const z = values[zIndex];
+                        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                            continue;
+                        }
+                        positions.push(x, y, z);
+                        if (rIndex >= 0 && gIndex >= 0 && bIndex >= 0) {
+                            colors.push(normalizeColorChannel(values[rIndex]), normalizeColorChannel(values[gIndex]), normalizeColorChannel(values[bIndex]));
+                        } else {
+                            colors.push(0.1, 0.85, 1.0);
+                        }
+                    }
+                    return makePointOverlay(filename, new Float32Array(positions), new Float32Array(colors));
+                }
+
+                const typeInfo = {
+                    char: [1, 'getInt8'],
+                    int8: [1, 'getInt8'],
+                    uchar: [1, 'getUint8'],
+                    uint8: [1, 'getUint8'],
+                    short: [2, 'getInt16'],
+                    int16: [2, 'getInt16'],
+                    ushort: [2, 'getUint16'],
+                    uint16: [2, 'getUint16'],
+                    int: [4, 'getInt32'],
+                    int32: [4, 'getInt32'],
+                    uint: [4, 'getUint32'],
+                    uint32: [4, 'getUint32'],
+                    float: [4, 'getFloat32'],
+                    float32: [4, 'getFloat32'],
+                    double: [8, 'getFloat64'],
+                    float64: [8, 'getFloat64']
+                };
+                let stride = 0;
+                const offsets = properties.map(property => {
+                    const info = typeInfo[property.type];
+                    if (!info) {
+                        throw new Error(`Unsupported PLY property type: ${property.type}`);
+                    }
+                    const offset = stride;
+                    stride += info[0];
+                    return { ...property, offset, getter: info[1] };
+                });
+
+                const view = new DataView(bytes.buffer, bytes.byteOffset + headerEnd, bytes.byteLength - headerEnd);
+                const positions = [];
+                const colors = [];
+                const read = (vertexBase, propertyIndex) => {
+                    const property = offsets[propertyIndex];
+                    return view[property.getter](vertexBase + property.offset, true);
+                };
+
+                for (let i = 0; i < vertexCount; i += sampleStride) {
+                    const base = i * stride;
+                    if (base + stride > view.byteLength) {
+                        break;
+                    }
+                    const x = read(base, xIndex);
+                    const y = read(base, yIndex);
+                    const z = read(base, zIndex);
+                    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+                        continue;
+                    }
+                    positions.push(x, y, z);
+                    if (rIndex >= 0 && gIndex >= 0 && bIndex >= 0) {
+                        colors.push(normalizeColorChannel(read(base, rIndex)), normalizeColorChannel(read(base, gIndex)), normalizeColorChannel(read(base, bIndex)));
+                    } else {
+                        colors.push(0.1, 0.85, 1.0);
+                    }
+                }
+                return makePointOverlay(filename, new Float32Array(positions), new Float32Array(colors));
+            }
+
+            function parseObjOverlay(filename, text) {
+                const vertices = [];
+                const linePositions = [];
+                const maxEdges = 2000000;
+                const edgeSet = new Set();
+                const lines = text.split(/\r?\n/);
+
+                const resolveIndex = (token) => {
+                    const raw = Number(token.split('/')[0]);
+                    if (!Number.isInteger(raw) || raw === 0) {
+                        return -1;
+                    }
+                    return raw > 0 ? raw - 1 : vertices.length + raw;
+                };
+
+                const addEdge = (a, b) => {
+                    if (a < 0 || b < 0 || a >= vertices.length || b >= vertices.length || a === b) {
+                        return;
+                    }
+                    const lo = Math.min(a, b);
+                    const hi = Math.max(a, b);
+                    const key = `${lo}:${hi}`;
+                    if (edgeSet.has(key) || edgeSet.size >= maxEdges) {
+                        return;
+                    }
+                    edgeSet.add(key);
+                    linePositions.push(...vertices[a], ...vertices[b]);
+                };
+
+                for (const rawLine of lines) {
+                    const line = rawLine.trim();
+                    if (!line || line.startsWith('#')) {
+                        continue;
+                    }
+                    const parts = line.split(/\s+/);
+                    if (parts[0] === 'v' && parts.length >= 4) {
+                        const x = Number(parts[1]);
+                        const y = Number(parts[2]);
+                        const z = Number(parts[3]);
+                        if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                            vertices.push([x, y, z]);
+                        }
+                    } else if (parts[0] === 'f' && parts.length >= 3) {
+                        const indices = parts.slice(1).map(resolveIndex).filter(index => index >= 0);
+                        for (let i = 0; i < indices.length; i++) {
+                            addEdge(indices[i], indices[(i + 1) % indices.length]);
+                        }
+                    } else if (parts[0] === 'l' && parts.length >= 3) {
+                        const indices = parts.slice(1).map(resolveIndex).filter(index => index >= 0);
+                        for (let i = 0; i < indices.length - 1; i++) {
+                            addEdge(indices[i], indices[i + 1]);
+                        }
+                    }
+                }
+
+                if (linePositions.length === 0) {
+                    throw new Error('No OBJ edges found in mesh overlay file.');
+                }
+                return makeMeshOverlay(filename, new Float32Array(linePositions));
+            }
+
+            function vec3Subtract(a, b) {
+                return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+            }
+
+            function vec3Normalize(v) {
+                const len = Math.hypot(v.x, v.y, v.z) || 1;
+                return { x: v.x / len, y: v.y / len, z: v.z / len };
+            }
+
+            function vec3Cross(a, b) {
+                return {
+                    x: a.y * b.z - a.z * b.y,
+                    y: a.z * b.x - a.x * b.z,
+                    z: a.x * b.y - a.y * b.x
+                };
+            }
+
+            function vec3Dot(a, b) {
+                return a.x * b.x + a.y * b.y + a.z * b.z;
+            }
+
+            function makeLookAtMatrix(eye, target) {
+                const z = vec3Normalize(vec3Subtract(eye, target));
+                let x = vec3Normalize(vec3Cross({ x: 0, y: 1, z: 0 }, z));
+                if (!Number.isFinite(x.x) || Math.hypot(x.x, x.y, x.z) < 0.0001) {
+                    x = vec3Normalize(vec3Cross({ x: 1, y: 0, z: 0 }, z));
+                }
+                const y = vec3Cross(z, x);
+                return new Float32Array([
+                    x.x, y.x, z.x, 0,
+                    x.y, y.y, z.y, 0,
+                    x.z, y.z, z.z, 0,
+                    -vec3Dot(x, eye), -vec3Dot(y, eye), -vec3Dot(z, eye), 1
+                ]);
+            }
+
+            function makePerspectiveMatrix(fovDegrees, aspect, near = 0.01, far = 1000000) {
+                const f = 1 / Math.tan((fovDegrees * Math.PI / 180) / 2);
+                const nf = 1 / (near - far);
+                return new Float32Array([
+                    f / aspect, 0, 0, 0,
+                    0, f, 0, 0,
+                    0, 0, (far + near) * nf, -1,
+                    0, 0, 2 * far * near * nf, 0
+                ]);
+            }
+
+            function multiplyMat4(a, b) {
+                const out = new Float32Array(16);
+                for (let col = 0; col < 4; col++) {
+                    for (let row = 0; row < 4; row++) {
+                        out[col * 4 + row] =
+                            a[0 * 4 + row] * b[col * 4 + 0] +
+                            a[1 * 4 + row] * b[col * 4 + 1] +
+                            a[2 * 4 + row] * b[col * 4 + 2] +
+                            a[3 * 4 + row] * b[col * 4 + 3];
+                    }
+                }
+                return out;
+            }
+
+            class GaussianViewerOverlayRenderer {
+                constructor() {
+                    this.overlays = [];
+                    this.nextOverlayId = 1;
+                    this.cameraGlyphScale = cameraGlyphScale;
+                    this.animationFrame = null;
+                    this.pointerDown = null;
+                    this.canvas = document.createElement('canvas');
+                    this.canvas.id = 'gaussian-viewer-overlay-canvas';
+                    this.canvas.style.position = 'absolute';
+                    this.canvas.style.inset = '0';
+                    this.canvas.style.width = '100%';
+                    this.canvas.style.height = '100%';
+                    this.canvas.style.pointerEvents = 'none';
+                    this.canvas.style.zIndex = '1';
+                    this.canvas.style.background = 'transparent';
+                    this.host = document.getElementById('canvas-container') || document.querySelector('canvas:not(#mask-canvas)')?.parentElement || document.body;
+                    if (this.host !== document.body && getComputedStyle(this.host).position === 'static') {
+                        this.host.style.position = 'relative';
+                    }
+                    this.host.appendChild(this.canvas);
+                    this.gl = this.canvas.getContext('webgl2', { alpha: true, antialias: true }) || this.canvas.getContext('webgl', { alpha: true, antialias: true });
+                    if (!this.gl) {
+                        throw new Error('WebGL overlay renderer is not available.');
+                    }
+                    this.program = this.createProgram();
+                    this.locations = {
+                        position: this.gl.getAttribLocation(this.program, 'a_position'),
+                        color: this.gl.getAttribLocation(this.program, 'a_color'),
+                        viewProj: this.gl.getUniformLocation(this.program, 'u_viewProj'),
+                        pointSize: this.gl.getUniformLocation(this.program, 'u_pointSize'),
+                        renderPoints: this.gl.getUniformLocation(this.program, 'u_renderPoints'),
+                        useUniformColor: this.gl.getUniformLocation(this.program, 'u_useUniformColor'),
+                        uniformColor: this.gl.getUniformLocation(this.program, 'u_uniformColor')
+                    };
+                    this.render = this.render.bind(this);
+                    this.installCameraPicking();
+                }
+
+                overlayCount() {
+                    return this.overlays.length;
+                }
+
+                listOverlays() {
+                    return this.overlays.map(overlay => ({
+                        id: overlay.id,
+                        filename: overlay.filename,
+                        displayName: overlay.displayName,
+                        visible: overlay.visible !== false,
+                        count: overlay.count,
+                        displayCount: overlay.displayCount,
+                        displayKind: overlay.displayKind,
+                        kind: overlay.kind
+                    }));
+                }
+
+                setOverlayVisible(id, visible) {
+                    const overlay = this.overlays.find(item => item.id === id);
+                    if (!overlay) {
+                        return;
+                    }
+                    overlay.visible = visible;
+                    this.start();
+                }
+
+                setCameraGlyphScale(scale) {
+                    this.cameraGlyphScale = Math.max(0.2, Math.min(3, Number(scale) || 1));
+                    const gl = this.gl;
+                    for (const overlay of this.overlays) {
+                        if (!overlay.cameraViews?.length || !overlay.basePositions) {
+                            continue;
+                        }
+                        this.applyCameraGlyphScale(overlay);
+                        gl.bindBuffer(gl.ARRAY_BUFFER, overlay.positionBuffer);
+                        gl.bufferData(gl.ARRAY_BUFFER, overlay.positions, gl.STATIC_DRAW);
+                    }
+                    this.start();
+                }
+
+                applyCameraGlyphScale(overlay) {
+                    overlay.positions.set(overlay.basePositions);
+                    const scale = this.cameraGlyphScale;
+                    if (Math.abs(scale - 1) < 0.0001) {
+                        return;
+                    }
+                    for (const camera of overlay.cameraViews) {
+                        for (let i = camera.start; i < camera.start + camera.count; i += 3) {
+                            overlay.positions[i] = camera.center.x + (overlay.basePositions[i] - camera.center.x) * scale;
+                            overlay.positions[i + 1] = camera.center.y + (overlay.basePositions[i + 1] - camera.center.y) * scale;
+                            overlay.positions[i + 2] = camera.center.z + (overlay.basePositions[i + 2] - camera.center.z) * scale;
+                        }
+                    }
+                }
+
+                createProgram() {
+                    const gl = this.gl;
+                    const vertexSource = `
+                        attribute vec3 a_position;
+                        attribute vec3 a_color;
+                        uniform mat4 u_viewProj;
+                        uniform float u_pointSize;
+                        uniform bool u_renderPoints;
+                        varying vec3 v_color;
+                        void main() {
+                            gl_Position = u_viewProj * vec4(a_position, 1.0);
+                            gl_PointSize = u_renderPoints ? u_pointSize : 1.0;
+                            v_color = a_color;
+                        }
+                    `;
+                    const fragmentSource = `
+                        precision mediump float;
+                        uniform bool u_renderPoints;
+                        uniform bool u_useUniformColor;
+                        uniform vec3 u_uniformColor;
+                        varying vec3 v_color;
+                        void main() {
+                            if (u_renderPoints && length(gl_PointCoord - vec2(0.5)) > 0.5) {
+                                discard;
+                            }
+                            vec3 color = u_useUniformColor ? u_uniformColor : v_color;
+                            gl_FragColor = vec4(color, 0.92);
+                        }
+                    `;
+                    const compile = (type, source) => {
+                        const shader = gl.createShader(type);
+                        gl.shaderSource(shader, source);
+                        gl.compileShader(shader);
+                        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                            throw new Error(gl.getShaderInfoLog(shader) || 'Overlay shader compile failed.');
+                        }
+                        return shader;
+                    };
+                    const program = gl.createProgram();
+                    gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+                    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
+                    gl.linkProgram(program);
+                    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                        throw new Error(gl.getProgramInfoLog(program) || 'Overlay shader link failed.');
+                    }
+                    return program;
+                }
+
+                addOverlay(overlay) {
+                    const gl = this.gl;
+                    const gpuOverlay = {
+                        ...overlay,
+                        id: overlay.id || `overlay-${this.nextOverlayId++}`,
+                        visible: overlay.visible !== false,
+                        basePositions: overlay.cameraViews?.length ? overlay.positions.slice() : null,
+                        positionBuffer: gl.createBuffer(),
+                        colorBuffer: overlay.colors ? gl.createBuffer() : null,
+                        cameraCenterBuffer: overlay.cameraCenters ? gl.createBuffer() : null
+                    };
+                    if (gpuOverlay.basePositions) {
+                        this.applyCameraGlyphScale(gpuOverlay);
+                    }
+                    gl.bindBuffer(gl.ARRAY_BUFFER, gpuOverlay.positionBuffer);
+                    gl.bufferData(gl.ARRAY_BUFFER, overlay.positions, gl.STATIC_DRAW);
+                    if (overlay.colors) {
+                        gl.bindBuffer(gl.ARRAY_BUFFER, gpuOverlay.colorBuffer);
+                        gl.bufferData(gl.ARRAY_BUFFER, overlay.colors, gl.STATIC_DRAW);
+                    }
+                    if (overlay.cameraCenters) {
+                        gl.bindBuffer(gl.ARRAY_BUFFER, gpuOverlay.cameraCenterBuffer);
+                        gl.bufferData(gl.ARRAY_BUFFER, overlay.cameraCenters, gl.STATIC_DRAW);
+                    }
+                    this.overlays.push(gpuOverlay);
+                    this.start();
+                }
+
+                clear() {
+                    const gl = this.gl;
+                    for (const overlay of this.overlays) {
+                        gl.deleteBuffer(overlay.positionBuffer);
+                        if (overlay.colorBuffer) {
+                            gl.deleteBuffer(overlay.colorBuffer);
+                        }
+                        if (overlay.cameraCenterBuffer) {
+                            gl.deleteBuffer(overlay.cameraCenterBuffer);
+                        }
+                    }
+                    this.overlays = [];
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                    if (this.animationFrame) {
+                        cancelAnimationFrame(this.animationFrame);
+                        this.animationFrame = null;
+                    }
+                }
+
+                start() {
+                    if (!this.animationFrame) {
+                        this.animationFrame = requestAnimationFrame(this.render);
+                    }
+                }
+
+                installCameraPicking() {
+                    const shouldIgnore = event => event.target?.closest?.('#gaussian-viewer-toolbar');
+                    window.addEventListener('pointerdown', event => {
+                        if (event.button !== 0 || shouldIgnore(event)) {
+                            this.pointerDown = null;
+                            return;
+                        }
+                        this.pointerDown = { x: event.clientX, y: event.clientY };
+                    }, true);
+                    window.addEventListener('pointerup', event => {
+                        if (event.button !== 0 || !this.pointerDown || shouldIgnore(event)) {
+                            this.pointerDown = null;
+                            return;
+                        }
+                        const dx = event.clientX - this.pointerDown.x;
+                        const dy = event.clientY - this.pointerDown.y;
+                        this.pointerDown = null;
+                        if (Math.hypot(dx, dy) > 5) {
+                            return;
+                        }
+                        const hit = this.pickCameraAt(event.clientX, event.clientY);
+                        if (!hit) {
+                            return;
+                        }
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.stopImmediatePropagation?.();
+                        this.flyToCameraView(hit.camera);
+                    }, true);
+                }
+
+                getViewProjection(width, height) {
+                    const viewpoint = normalizeViewpoint(window.scene.events.invoke('camera.getPose'));
+                    const fov = Number(window.scene.events.invoke('camera.fov'));
+                    viewpoint.fov = Number.isFinite(fov) ? fov : 45;
+                    const view = makeLookAtMatrix(viewpoint.position, viewpoint.target);
+                    const projection = makePerspectiveMatrix(viewpoint.fov || 45, width / height);
+                    return multiplyMat4(projection, view);
+                }
+
+                projectPoint(matrix, point, rect) {
+                    const x = point[0], y = point[1], z = point[2];
+                    const clipX = matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12];
+                    const clipY = matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13];
+                    const clipW = matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15];
+                    if (!Number.isFinite(clipW) || clipW <= 0.000001) {
+                        return null;
+                    }
+                    const ndcX = clipX / clipW;
+                    const ndcY = clipY / clipW;
+                    if (ndcX < -1.2 || ndcX > 1.2 || ndcY < -1.2 || ndcY > 1.2) {
+                        return null;
+                    }
+                    return {
+                        x: rect.left + (ndcX * 0.5 + 0.5) * rect.width,
+                        y: rect.top + (0.5 - ndcY * 0.5) * rect.height
+                    };
+                }
+
+                distanceToSegment(px, py, a, b) {
+                    const dx = b.x - a.x;
+                    const dy = b.y - a.y;
+                    const len2 = dx * dx + dy * dy;
+                    if (len2 <= 0.000001) {
+                        return Math.hypot(px - a.x, py - a.y);
+                    }
+                    const t = Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / len2));
+                    return Math.hypot(px - (a.x + dx * t), py - (a.y + dy * t));
+                }
+
+                pickCameraAt(clientX, clientY) {
+                    const rect = this.host.getBoundingClientRect();
+                    if (!rect.width || !rect.height) {
+                        return null;
+                    }
+                    let viewProj;
+                    try {
+                        viewProj = this.getViewProjection(rect.width, rect.height);
+                    } catch (error) {
+                        return null;
+                    }
+                    let best = null;
+                    const threshold = 10;
+                    for (const overlay of this.overlays) {
+                        if (overlay.visible === false || !overlay.cameraViews?.length) {
+                            continue;
+                        }
+                        for (const camera of overlay.cameraViews) {
+                            for (let i = camera.start; i < camera.start + camera.count; i += 6) {
+                                const a = this.projectPoint(viewProj, [overlay.positions[i], overlay.positions[i + 1], overlay.positions[i + 2]], rect);
+                                const b = this.projectPoint(viewProj, [overlay.positions[i + 3], overlay.positions[i + 4], overlay.positions[i + 5]], rect);
+                                if (!a || !b) {
+                                    continue;
+                                }
+                                const distance = this.distanceToSegment(clientX, clientY, a, b);
+                                if (distance <= threshold && (!best || distance < best.distance)) {
+                                    best = { distance, camera };
+                                }
+                            }
+                        }
+                    }
+                    return best;
+                }
+
+                flyToCameraView(camera) {
+                    try {
+                        const events = window.scene.events;
+                        const position = camera.center;
+                        const target = {
+                            x: camera.center.x + camera.forward.x * camera.targetDistance,
+                            y: camera.center.y + camera.forward.y * camera.targetDistance,
+                            z: camera.center.z + camera.forward.z * camera.targetDistance
+                        };
+                        if (Number.isFinite(camera.fov)) {
+                            events.fire('camera.setFov', camera.fov);
+                        }
+                        events.fire('camera.setPose', { position, target }, 0.45);
+                        updateOverlayStatus(`camera ${camera.name}`);
+                    } catch (error) {
+                        console.error('Failed to fly to COLMAP camera:', error);
+                        updateOverlayStatus('camera fly-to failed');
+                    }
+                }
+
+                resize() {
+                    const rect = this.host.getBoundingClientRect();
+                    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+                    const width = Math.max(1, Math.floor(rect.width * dpr));
+                    const height = Math.max(1, Math.floor(rect.height * dpr));
+                    if (this.canvas.width !== width || this.canvas.height !== height) {
+                        this.canvas.width = width;
+                        this.canvas.height = height;
+                    }
+                    this.gl.viewport(0, 0, width, height);
+                    return { width, height };
+                }
+
+                render() {
+                    this.animationFrame = null;
+                    if (this.overlays.length === 0 || !this.overlays.some(overlay => overlay.visible !== false)) {
+                        this.gl.clear(this.gl.COLOR_BUFFER_BIT | this.gl.DEPTH_BUFFER_BIT);
+                        return;
+                    }
+
+                    const gl = this.gl;
+                    const { width, height } = this.resize();
+                    let viewProj;
+                    try {
+                        viewProj = this.getViewProjection(width, height);
+                    } catch (error) {
+                        this.start();
+                        return;
+                    }
+
+                    gl.clearColor(0, 0, 0, 0);
+                    gl.clearDepth(1);
+                    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                    gl.enable(gl.DEPTH_TEST);
+                    gl.depthFunc(gl.LEQUAL);
+                    gl.useProgram(this.program);
+                    gl.uniformMatrix4fv(this.locations.viewProj, false, viewProj);
+
+                    for (const overlay of this.overlays) {
+                        if (overlay.visible === false) {
+                            continue;
+                        }
+                        gl.bindBuffer(gl.ARRAY_BUFFER, overlay.positionBuffer);
+                        gl.enableVertexAttribArray(this.locations.position);
+                        gl.vertexAttribPointer(this.locations.position, 3, gl.FLOAT, false, 0, 0);
+
+                        if (overlay.colorBuffer) {
+                            gl.bindBuffer(gl.ARRAY_BUFFER, overlay.colorBuffer);
+                            gl.enableVertexAttribArray(this.locations.color);
+                            gl.vertexAttribPointer(this.locations.color, 3, gl.FLOAT, false, 0, 0);
+                            gl.uniform1i(this.locations.useUniformColor, 0);
+                        } else {
+                            gl.disableVertexAttribArray(this.locations.color);
+                            const uniformColor = overlay.uniformColor || [1.0, 0.55, 0.08];
+                            gl.vertexAttrib3f(this.locations.color, uniformColor[0], uniformColor[1], uniformColor[2]);
+                            gl.uniform1i(this.locations.useUniformColor, 1);
+                            gl.uniform3f(this.locations.uniformColor, uniformColor[0], uniformColor[1], uniformColor[2]);
+                        }
+
+                        if (overlay.kind === 'mesh') {
+                            gl.uniform1i(this.locations.renderPoints, 0);
+                            gl.uniform1f(this.locations.pointSize, 1);
+                            gl.drawArrays(gl.LINES, 0, overlay.count);
+                            if (overlay.cameraCenterBuffer && overlay.cameraCenters?.length) {
+                                gl.bindBuffer(gl.ARRAY_BUFFER, overlay.cameraCenterBuffer);
+                                gl.enableVertexAttribArray(this.locations.position);
+                                gl.vertexAttribPointer(this.locations.position, 3, gl.FLOAT, false, 0, 0);
+                                gl.uniform1i(this.locations.renderPoints, 1);
+                                gl.uniform1f(this.locations.pointSize, Math.max(2.5, 4.0 * this.cameraGlyphScale));
+                                gl.drawArrays(gl.POINTS, 0, overlay.cameraCenters.length / 3);
+                            }
+                        } else {
+                            gl.uniform1i(this.locations.renderPoints, 1);
+                            gl.uniform1f(this.locations.pointSize, overlay.pointSize || 2.5);
+                            gl.drawArrays(gl.POINTS, 0, overlay.count);
+                        }
+                    }
+
+                    this.start();
+                }
+            }
+
+            function toPlainVec3(value, fieldName) {
+                const vec = {
+                    x: Number(value?.x),
+                    y: Number(value?.y),
+                    z: Number(value?.z)
+                };
+                if (!Number.isFinite(vec.x) || !Number.isFinite(vec.y) || !Number.isFinite(vec.z)) {
+                    throw new Error(`Invalid viewpoint ${fieldName}.`);
+                }
+                return vec;
+            }
+
+            function normalizeViewpoint(value) {
+                const source = value?.viewpoint || value?.camera || value;
+                if (!source || typeof source !== 'object') {
+                    throw new Error('Invalid viewpoint payload.');
+                }
+
+                const viewpoint = {
+                    version: 1,
+                    type: 'GaussianViewer.viewpoint',
+                    position: toPlainVec3(source.position, 'position'),
+                    target: toPlainVec3(source.target, 'target')
+                };
+
+                if (source.fov !== undefined && source.fov !== null) {
+                    const fov = Number(source.fov);
+                    if (!Number.isFinite(fov) || fov <= 0 || fov >= 180) {
+                        throw new Error('Invalid viewpoint fov.');
+                    }
+                    viewpoint.fov = fov;
+                }
+
+                return viewpoint;
+            }
+
+            async function handleViewpointGet(message) {
+                try {
+                    const events = await waitForSceneEvents();
+                    const pose = events.invoke('camera.getPose');
+                    const viewpoint = normalizeViewpoint(pose);
+                    try {
+                        const fov = events.invoke('camera.fov');
+                        if (Number.isFinite(Number(fov))) {
+                            viewpoint.fov = Number(fov);
+                        }
+                    } catch (error) {
+                        // Older SuperSplat builds may not expose fov; pose alone is enough.
+                    }
+
+                    vscode?.postMessage({
+                        type: 'viewpoint/get/response',
+                        requestId: message.requestId,
+                        success: true,
+                        viewpoint
+                    });
+                } catch (error) {
+                    vscode?.postMessage({
+                        type: 'viewpoint/get/response',
+                        requestId: message.requestId,
+                        success: false,
+                        error: error.message || String(error)
+                    });
+                }
+            }
+
+            async function handleViewpointApply(message) {
+                try {
+                    const events = await waitForSceneEvents();
+                    const viewpoint = normalizeViewpoint(message.viewpoint);
+                    if (viewpoint.fov !== undefined) {
+                        events.fire('camera.setFov', viewpoint.fov);
+                    }
+                    events.fire('camera.setPose', {
+                        position: viewpoint.position,
+                        target: viewpoint.target
+                    }, Number.isFinite(Number(message.duration)) ? Number(message.duration) : 0);
+
+                    vscode?.postMessage({
+                        type: 'viewpoint/apply/response',
+                        requestId: message.requestId,
+                        success: true
+                    });
+                } catch (error) {
+                    vscode?.postMessage({
+                        type: 'viewpoint/apply/response',
+                        requestId: message.requestId,
+                        success: false,
+                        error: error.message || String(error)
+                    });
+                }
+            }
+
+            function stopCinematicOrbit() {
+                if (cinematicOrbit?.animationFrame) {
+                    cancelAnimationFrame(cinematicOrbit.animationFrame);
+                }
+                cinematicOrbit = null;
+                document.querySelector('#gaussian-viewer-toolbar button[data-action="orbit"]')?.classList.remove('active');
+            }
+
+            async function startCinematicOrbit(message) {
+                try {
+                    const events = await waitForSceneEvents();
+                    const viewpoint = normalizeViewpoint(events.invoke('camera.getPose'));
+                    stopCinematicOrbit();
+
+                    const target = viewpoint.target;
+                    const initialOffset = {
+                        x: viewpoint.position.x - target.x,
+                        y: viewpoint.position.y - target.y,
+                        z: viewpoint.position.z - target.z
+                    };
+                    const radius = Math.hypot(initialOffset.x, initialOffset.z);
+                    if (!Number.isFinite(radius) || radius < 0.0001) {
+                        throw new Error('Move the camera away from the target before starting orbit.');
+                    }
+
+                    const durationMs = Math.max(3000, Number(message.durationMs) || 15000);
+                    const mode = message.mode || 'turntable';
+                    const direction = mode === 'reverse' || message.direction === 'clockwise' ? -1 : 1;
+                    const startTime = performance.now();
+
+                    cinematicOrbit = {
+                        animationFrame: null,
+                        durationMs,
+                        lastTime: startTime,
+                        lastDolly: 0,
+                        lastBob: 0,
+                        lastUserInput: 0
+                    };
+
+                    const tick = (now) => {
+                        if (!cinematicOrbit) {
+                            return;
+                        }
+
+                        const elapsedSinceUserInput = now - cinematicOrbit.lastUserInput;
+                        if (elapsedSinceUserInput >= 0 && elapsedSinceUserInput < 180) {
+                            cinematicOrbit.lastTime = now;
+                            cinematicOrbit.animationFrame = requestAnimationFrame(tick);
+                            return;
+                        }
+
+                        let current;
+                        try {
+                            current = normalizeViewpoint(events.invoke('camera.getPose'));
+                        } catch (error) {
+                            stopCinematicOrbit();
+                            return;
+                        }
+
+                        const elapsedMs = Math.max(0, now - cinematicOrbit.lastTime);
+                        cinematicOrbit.lastTime = now;
+
+                        const target = current.target;
+                        const offset = {
+                            x: current.position.x - target.x,
+                            y: current.position.y - target.y,
+                            z: current.position.z - target.z
+                        };
+                        const currentRadius = Math.hypot(offset.x, offset.z);
+                        if (!Number.isFinite(currentRadius) || currentRadius < 0.0001) {
+                            cinematicOrbit.animationFrame = requestAnimationFrame(tick);
+                            return;
+                        }
+
+                        const normalizedTime = ((now - startTime) % durationMs) / durationMs;
+                        const prevNormalizedTime = (((now - elapsedMs) - startTime) % durationMs) / durationMs;
+                        const phase = normalizedTime * Math.PI * 2;
+                        const prevPhase = prevNormalizedTime * Math.PI * 2;
+
+                        let angleDelta = direction * Math.PI * 2 * (elapsedMs / durationMs);
+                        if (mode === 'sway') {
+                            const amplitude = Math.PI / 3;
+                            angleDelta = (Math.sin(phase) - Math.sin(prevPhase)) * amplitude;
+                        }
+
+                        const cos = Math.cos(angleDelta);
+                        const sin = Math.sin(angleDelta);
+                        let rotated = {
+                            x: offset.x * cos - offset.z * sin,
+                            y: offset.y,
+                            z: offset.x * sin + offset.z * cos
+                        };
+
+                        if (mode === 'dolly') {
+                            const dolly = Math.sin(phase) * 0.12;
+                            const scale = 1 + dolly - cinematicOrbit.lastDolly;
+                            rotated.x *= scale;
+                            rotated.y *= scale;
+                            rotated.z *= scale;
+                            cinematicOrbit.lastDolly = dolly;
+                        } else {
+                            cinematicOrbit.lastDolly = 0;
+                        }
+
+                        if (mode === 'bob') {
+                            const bob = Math.sin(phase * 2) * currentRadius * 0.08;
+                            rotated.y += bob - cinematicOrbit.lastBob;
+                            cinematicOrbit.lastBob = bob;
+                        } else {
+                            cinematicOrbit.lastBob = 0;
+                        }
+
+                        const position = {
+                            x: target.x + rotated.x,
+                            y: target.y + rotated.y,
+                            z: target.z + rotated.z
+                        };
+
+                        events.fire('camera.setPose', { position, target }, 0);
+                        cinematicOrbit.animationFrame = requestAnimationFrame(tick);
+                    };
+
+                    cinematicOrbit.animationFrame = requestAnimationFrame(tick);
+                    document.querySelector('#gaussian-viewer-toolbar button[data-action="orbit"]')?.classList.add('active');
+                } catch (error) {
+                    document.querySelector('#gaussian-viewer-toolbar button[data-action="orbit"]')?.classList.remove('active');
+                    console.error('Failed to start cinematic orbit:', error);
+                    vscode?.postMessage({
+                        type: 'error',
+                        message: error.message || String(error)
+                    });
                 }
             }
             

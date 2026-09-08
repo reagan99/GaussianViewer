@@ -35,6 +35,9 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.performanceConfigurationSchema = exports.PerformanceConfigManager = void 0;
 const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
+const plyOptimizer_1 = require("./plyOptimizer");
 class PerformanceConfigManager {
     constructor(context) {
         this.context = context;
@@ -93,6 +96,37 @@ class PerformanceConfigManager {
             workspaceConfig.update(key, value, vscode.ConfigurationTarget.Workspace);
         }
     }
+    getCacheDir() {
+        return path.join(this.context.extensionPath, 'cache', 'ply');
+    }
+    getCacheIndex() {
+        const indexPath = path.join(this.getCacheDir(), 'index.json');
+        try {
+            if (fs.existsSync(indexPath)) {
+                return JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+            }
+        }
+        catch (error) {
+            console.warn('Failed to read SuperSplat cache index:', error);
+        }
+        return {};
+    }
+    walkFiles(rootPath) {
+        if (!fs.existsSync(rootPath)) {
+            return [];
+        }
+        const results = [];
+        for (const entry of fs.readdirSync(rootPath, { withFileTypes: true })) {
+            const entryPath = path.join(rootPath, entry.name);
+            if (entry.isDirectory()) {
+                results.push(...this.walkFiles(entryPath));
+            }
+            else if (entry.isFile()) {
+                results.push(entryPath);
+            }
+        }
+        return results;
+    }
     // Performance profiling commands
     async showPerformanceStats() {
         const stats = await this.collectPerformanceStats();
@@ -114,16 +148,26 @@ class PerformanceConfigManager {
         };
     }
     async getCacheSize() {
-        // Implementation to calculate cache size
-        return 0; // Placeholder
+        return this.walkFiles(this.getCacheDir()).reduce((total, filePath) => {
+            try {
+                return total + fs.statSync(filePath).size;
+            }
+            catch {
+                return total;
+            }
+        }, 0);
     }
     async getCacheHitRatio() {
-        // Implementation to calculate cache hit ratio
-        return 0; // Placeholder
+        const index = this.getCacheIndex();
+        const entries = Object.values(index);
+        if (entries.length === 0) {
+            return 0;
+        }
+        const valid = entries.filter((entry) => entry?.convertedPath && fs.existsSync(entry.convertedPath)).length;
+        return valid / entries.length;
     }
     async getAverageLoadTime() {
-        // Implementation to calculate average load time
-        return 0; // Placeholder
+        return 0;
     }
     getActiveWebviewCount() {
         // Implementation to count active webviews
@@ -185,7 +229,8 @@ class PerformanceConfigManager {
             // Clear PLY cache
             const response = await vscode.window.showWarningMessage('This will clear all SuperSplat caches. Continue?', 'Clear Caches', 'Cancel');
             if (response === 'Clear Caches') {
-                // Implementation to clear caches
+                fs.rmSync(this.getCacheDir(), { recursive: true, force: true });
+                fs.mkdirSync(this.getCacheDir(), { recursive: true });
                 vscode.window.showInformationMessage('SuperSplat caches cleared successfully.');
             }
         }
@@ -196,13 +241,16 @@ class PerformanceConfigManager {
     // Command to optimize current file
     async optimizeCurrentFile() {
         const activeEditor = vscode.window.activeTextEditor;
-        if (!activeEditor) {
-            vscode.window.showWarningMessage('No active file to optimize.');
-            return;
+        let filePath = activeEditor?.document.fileName;
+        if (!filePath || !filePath.toLowerCase().endsWith('.ply')) {
+            const selection = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                filters: { 'PLY Files': ['ply'] }
+            });
+            filePath = selection?.[0]?.fsPath;
         }
-        const filePath = activeEditor.document.fileName;
-        if (!filePath.toLowerCase().endsWith('.ply')) {
-            vscode.window.showWarningMessage('Active file is not a PLY file.');
+        if (!filePath || !filePath.toLowerCase().endsWith('.ply')) {
+            vscode.window.showWarningMessage('No PLY file selected.');
             return;
         }
         try {
@@ -212,8 +260,8 @@ class PerformanceConfigManager {
                 cancellable: false
             }, async (progress) => {
                 progress.report({ message: 'Converting to binary format...' });
-                // Implementation to optimize the file
-                await new Promise(resolve => setTimeout(resolve, 2000)); // Placeholder
+                const optimizer = new plyOptimizer_1.PLYOptimizer(this.context);
+                await optimizer.optimizePLY(filePath);
                 progress.report({ message: 'Complete!' });
             });
             vscode.window.showInformationMessage('PLY file optimized successfully.');
@@ -246,6 +294,11 @@ exports.performanceConfigurationSchema = {
         "default": 10,
         "description": "File size threshold in MB for using optimized transfer methods"
     },
+    "supersplat.performance.chunkSize": {
+        "type": "number",
+        "default": 8388608,
+        "description": "Default chunk size in bytes for large file transfer"
+    },
     "supersplat.performance.enableDirectUriTransfer": {
         "type": "boolean",
         "default": true,
@@ -270,6 +323,16 @@ exports.performanceConfigurationSchema = {
         "type": "boolean",
         "default": false,
         "description": "Enable experimental level-of-detail optimization for large models"
+    },
+    "supersplat.performance.enableGarbageCollection": {
+        "type": "boolean",
+        "default": true,
+        "description": "Periodically prune stale or oversized PLY cache files"
+    },
+    "supersplat.performance.gcInterval": {
+        "type": "number",
+        "default": 300000,
+        "description": "Interval in milliseconds for pruning stale PLY cache files"
     },
     "supersplat.performance.maxCacheSize": {
         "type": "number",

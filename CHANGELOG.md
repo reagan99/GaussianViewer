@@ -1,5 +1,120 @@
 # Change Log
 
+## [1.0.23] - 2026-09-08
+
+### Fixed
+- Keep the auxiliary overlay canvas below SuperSplat UI panels so points and cameras no longer cover the Scene Manager.
+
+## [1.0.22] - 2026-09-08
+
+### Changed
+- Set the default COLMAP camera glyph size to `0.001` of the scene diagonal.
+- Switch COLMAP cameras to a vivid magenta color for stronger visibility.
+
+## [1.0.21] - 2026-09-08
+
+### Added
+- Add a compact camera size slider for COLMAP camera overlays.
+
+### Changed
+- Reduce the default COLMAP camera glyph size again.
+- Use a quieter amber camera color and render camera center dots to make dense camera sets easier to read.
+
+## [1.0.20] - 2026-09-08
+
+### Changed
+- Reduce COLMAP camera glyph size.
+- Normalize COLMAP overlay row labels to `Points` and `Cameras` while keeping actual counts in one place.
+
+## [1.0.19] - 2026-09-08
+
+### Changed
+- Make the Scene Manager overlay controls more compact.
+- Show actual point, edge, and camera counts in the overlay list.
+- Draw COLMAP cameras as compact camera glyphs instead of long frustum rays.
+
+## [1.0.18] - 2026-09-08
+
+### Added
+- Add click-to-fly behavior for COLMAP camera frustums.
+- Add a Scene Manager overlay list with checkboxes for turning loaded point, mesh, and COLMAP camera overlays on and off.
+
+## [1.0.17] - 2026-09-08
+
+### Added
+- Add a Scene Manager `+ COLMAP` action that accepts a project, `sparse`, or `sparse/0` folder and overlays sparse points plus camera frustums.
+- Parse COLMAP `cameras.bin`, `images.bin`, and `points3D.bin` together for reconstruction overlays.
+
+### Fixed
+- Align auxiliary point, mesh, and COLMAP overlays with SuperSplat's displayed 3DGS coordinate transform.
+
+## [1.0.16] - 2026-09-08
+
+### Added
+- Add COLMAP `points3D.bin` support for point overlays.
+- Add pending overlay load state with an explicit Cancel control in the Scene Manager panel.
+
+### Fixed
+- Reset overlay UI state when a point or mesh file selection is cancelled.
+
+## [1.0.15] - 2026-09-08
+
+### Added
+- Add auxiliary overlay loading from the Scene Manager panel.
+- Support point overlays from PLY, XYZ, TXT, CSV, and COLMAP-style `points3D.txt` rows.
+- Support OBJ mesh overlays as camera-synced wireframes.
+
+### Changed
+- Downsample large point overlays to protect webview memory while keeping scene alignment visible.
+
+## [1.0.14] - 2026-09-08
+
+### Changed
+- Move GaussianViewer orbit controls into the SuperSplat scene manager panel when available.
+- Expand cinematic orbit modes to Turntable, Reverse, Dolly Orbit, Bob Orbit, and Sway.
+- Let camera orbit continue from the latest user-adjusted pose instead of overriding zoom, pan, or drag input.
+
+## [1.0.13] - 2026-09-08
+
+### Added
+- Add an in-viewer GaussianViewer toolbar with Orbit/Stop buttons and orbit speed presets.
+
+## [1.0.12] - 2026-09-08
+
+### Added
+- Add a cinematic orbit mode that automatically rotates the active viewer camera around the current target.
+- Add command palette actions to start and stop cinematic orbit with normal, slow, and fast presets.
+
+## [1.0.11] - 2026-09-08
+
+### Added
+- Add command palette actions to copy, save, and load the current SuperSplat camera viewpoint as JSON.
+- Store camera position, target, and fov so the same scene framing can be restored later.
+
+## [1.0.10] - 2026-09-08
+
+### Fixed
+- Use the single streaming fallback path for files above 500MB so large remote PLY files show progress and avoid direct webview fetch stalls.
+
+## [1.0.9] - 2026-09-08
+
+### Fixed
+- Avoid duplicate large-file loading paths that could stream, assemble, and reinitialize the same model repeatedly.
+- Load files below the VS Code buffer limit through direct webview resource URLs instead of IPC chunk assembly.
+
+## [1.0.8] - 2026-09-08
+
+### Fixed
+- Avoid running the PLY optimizer on `.splat` and `.gsplat` files.
+- Honor the optimized document loader path so large files are not read into extension-host memory unnecessarily.
+- Improve ASCII PLY header parsing for CRLF files and vertex-only property handling.
+- Preserve the final newline after `end_header` when converting ASCII PLY files to binary.
+
+### Changed
+- Prune the PLY cache by age and size instead of clearing the entire cache periodically.
+- Make performance commands available from the command palette and add a PLY explorer context action.
+- Replace placeholder cache stats and cache clearing with working implementations.
+
 ## [1.0.7] - 2026-01-27
 
 ### Added

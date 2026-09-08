@@ -37,6 +37,7 @@ exports.PLYOptimizer = void 0;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
+const vscode = __importStar(require("vscode"));
 class PLYOptimizer {
     constructor(context) {
         this.context = context;
@@ -89,16 +90,16 @@ class PLYOptimizer {
                     return;
                 }
                 headerBuffer += chunk;
-                // Look for "end_header" to determine header end
-                const endHeaderIndex = headerBuffer.indexOf('end_header');
+                // Look for the complete end_header line to determine header end.
+                const endHeaderMatch = headerBuffer.match(/end_header\r?\n/);
+                const endHeaderIndex = endHeaderMatch ? endHeaderMatch.index : -1;
                 if (endHeaderIndex !== -1) {
                     headerComplete = true;
                     stream.destroy();
                     const headerLines = headerBuffer.substring(0, endHeaderIndex).split('\n');
                     const header = this.parsePLYHeader(headerLines);
                     if (header) {
-                        // Calculate header end offset in bytes
-                        header.headerEndOffset = Buffer.byteLength(headerBuffer.substring(0, endHeaderIndex + 11), 'ascii'); // +11 for "end_header\n"
+                        header.headerEndOffset = Buffer.byteLength(headerBuffer.substring(0, endHeaderIndex + endHeaderMatch[0].length), 'ascii');
                     }
                     resolve(header);
                 }
@@ -119,6 +120,7 @@ class PLYOptimizer {
         let format = null;
         let vertexCount = 0;
         const properties = [];
+        let currentElement = null;
         for (const line of lines) {
             const trimmed = line.trim();
             if (trimmed.startsWith('format ')) {
@@ -129,10 +131,14 @@ class PLYOptimizer {
             }
             else if (trimmed.startsWith('element vertex ')) {
                 vertexCount = parseInt(trimmed.split(' ')[2]);
+                currentElement = 'vertex';
             }
-            else if (trimmed.startsWith('property ')) {
+            else if (trimmed.startsWith('element ')) {
+                currentElement = trimmed.split(' ')[1] || null;
+            }
+            else if (currentElement === 'vertex' && trimmed.startsWith('property ')) {
                 const parts = trimmed.split(' ');
-                if (parts.length >= 3) {
+                if (parts.length >= 3 && parts[1] !== 'list') {
                     const type = parts[1];
                     const name = parts[2];
                     const size = this.getTypeSize(type);
@@ -151,13 +157,29 @@ class PLYOptimizer {
         };
     }
     getTypeSize(type) {
-        switch (type) {
-            case 'float': return 4;
-            case 'double': return 8;
-            case 'uchar': return 1;
-            case 'int': return 4;
-            case 'uint': return 4;
-            default: return 4;
+        switch (type.toLowerCase()) {
+            case 'char':
+            case 'int8':
+            case 'uchar':
+            case 'uint8':
+                return 1;
+            case 'short':
+            case 'int16':
+            case 'ushort':
+            case 'uint16':
+                return 2;
+            case 'int':
+            case 'int32':
+            case 'uint':
+            case 'uint32':
+            case 'float':
+            case 'float32':
+                return 4;
+            case 'double':
+            case 'float64':
+                return 8;
+            default:
+                return 4;
         }
     }
     async convertASCIIToBinary(filePath, header) {
@@ -168,16 +190,15 @@ class PLYOptimizer {
             let headerSkipped = false;
             let buffer = '';
             let verticesProcessed = 0;
-            const vertexSize = header.properties.reduce((sum, prop) => sum + prop.size, 0);
             // Write binary header
             const binaryHeader = this.createBinaryHeader(header);
             writeStream.write(binaryHeader);
             readStream.on('data', (chunk) => {
                 buffer += chunk;
                 if (!headerSkipped) {
-                    const endHeaderIndex = buffer.indexOf('end_header\n');
-                    if (endHeaderIndex !== -1) {
-                        buffer = buffer.substring(endHeaderIndex + 11); // Skip header
+                    const endHeaderMatch = buffer.match(/end_header\r?\n/);
+                    if (endHeaderMatch) {
+                        buffer = buffer.substring(endHeaderMatch.index + endHeaderMatch[0].length);
                         headerSkipped = true;
                     }
                     else {
@@ -217,7 +238,7 @@ class PLYOptimizer {
             lines.push(`property ${prop.type} ${prop.name}`);
         }
         lines.push('end_header');
-        return Buffer.from(lines.join('\n'), 'ascii');
+        return Buffer.from(lines.join('\n') + '\n', 'ascii');
     }
     convertVertexToBinary(line, properties) {
         const values = line.split(/\s+/);
@@ -225,28 +246,51 @@ class PLYOptimizer {
         for (let i = 0; i < properties.length && i < values.length; i++) {
             const prop = properties[i];
             const value = parseFloat(values[i]);
-            switch (prop.type) {
+            switch (prop.type.toLowerCase()) {
+                case 'char':
+                case 'int8':
+                    const charBuffer = Buffer.allocUnsafe(1);
+                    charBuffer.writeInt8(Math.round(value), 0);
+                    buffers.push(charBuffer);
+                    break;
                 case 'float':
+                case 'float32':
                     const floatBuffer = Buffer.allocUnsafe(4);
                     floatBuffer.writeFloatLE(value, 0);
                     buffers.push(floatBuffer);
                     break;
                 case 'double':
+                case 'float64':
                     const doubleBuffer = Buffer.allocUnsafe(8);
                     doubleBuffer.writeDoubleLE(value, 0);
                     buffers.push(doubleBuffer);
                     break;
                 case 'uchar':
+                case 'uint8':
                     const ucharBuffer = Buffer.allocUnsafe(1);
                     ucharBuffer.writeUInt8(Math.round(value), 0);
                     buffers.push(ucharBuffer);
                     break;
+                case 'short':
+                case 'int16':
+                    const shortBuffer = Buffer.allocUnsafe(2);
+                    shortBuffer.writeInt16LE(Math.round(value), 0);
+                    buffers.push(shortBuffer);
+                    break;
+                case 'ushort':
+                case 'uint16':
+                    const ushortBuffer = Buffer.allocUnsafe(2);
+                    ushortBuffer.writeUInt16LE(Math.round(value), 0);
+                    buffers.push(ushortBuffer);
+                    break;
                 case 'int':
+                case 'int32':
                     const intBuffer = Buffer.allocUnsafe(4);
                     intBuffer.writeInt32LE(Math.round(value), 0);
                     buffers.push(intBuffer);
                     break;
                 case 'uint':
+                case 'uint32':
                     const uintBuffer = Buffer.allocUnsafe(4);
                     uintBuffer.writeUInt32LE(Math.round(value), 0);
                     buffers.push(uintBuffer);
@@ -256,11 +300,14 @@ class PLYOptimizer {
         return Buffer.concat(buffers);
     }
     async optimizePLY(filePath) {
+        const config = vscode.workspace.getConfiguration('supersplat.performance');
+        const enableConversion = config.get('enableASCIIToBinaryConversion', true);
+        const enableCaching = config.get('enablePLYCaching', true);
         const fileHash = this.getFileHash(filePath);
         const stat = fs.statSync(filePath);
         // Check cache first
         const cacheEntry = this.cacheIndex.get(filePath);
-        if (cacheEntry && cacheEntry.hash === fileHash && cacheEntry.mtime === stat.mtime.getTime()) {
+        if (enableCaching && cacheEntry && cacheEntry.hash === fileHash && cacheEntry.mtime === stat.mtime.getTime()) {
             if (fs.existsSync(cacheEntry.convertedPath)) {
                 return cacheEntry.convertedPath;
             }
@@ -272,18 +319,80 @@ class PLYOptimizer {
         }
         let optimizedPath = filePath;
         // Convert ASCII to binary if needed
-        if (header.format === 'ascii') {
+        if (header.format === 'ascii' && enableConversion) {
             console.log(`Converting ASCII PLY to binary: ${filePath}`);
             optimizedPath = await this.convertASCIIToBinary(filePath, header);
             // Update cache
-            this.cacheIndex.set(filePath, {
-                hash: fileHash,
-                mtime: stat.mtime.getTime(),
-                convertedPath: optimizedPath
-            });
-            this.saveCacheIndex();
+            if (enableCaching) {
+                this.cacheIndex.set(filePath, {
+                    hash: fileHash,
+                    mtime: stat.mtime.getTime(),
+                    convertedPath: optimizedPath,
+                    sourceSize: stat.size,
+                    cacheSize: fs.statSync(optimizedPath).size,
+                    createdAt: Date.now(),
+                    lastAccessed: Date.now()
+                });
+                this.saveCacheIndex();
+            }
         }
         return optimizedPath;
+    }
+    getCacheFiles() {
+        const files = [];
+        if (!fs.existsSync(this.cacheDir)) {
+            return files;
+        }
+        for (const name of fs.readdirSync(this.cacheDir)) {
+            const filePath = path.join(this.cacheDir, name);
+            if (filePath.endsWith('index.json') || !fs.existsSync(filePath)) {
+                continue;
+            }
+            const stat = fs.statSync(filePath);
+            if (stat.isFile()) {
+                files.push({ filePath, size: stat.size, mtime: stat.mtime.getTime() });
+            }
+        }
+        return files;
+    }
+    getCacheSize() {
+        return this.getCacheFiles().reduce((total, file) => total + file.size, 0);
+    }
+    pruneCache(maxSizeMB = 500, maxAgeMs = 24 * 60 * 60 * 1000) {
+        try {
+            const now = Date.now();
+            const maxSizeBytes = maxSizeMB * 1024 * 1024;
+            const cacheFiles = this.getCacheFiles().sort((a, b) => a.mtime - b.mtime);
+            const keepPaths = new Set();
+            for (const file of cacheFiles) {
+                if (now - file.mtime > maxAgeMs) {
+                    fs.rmSync(file.filePath, { force: true });
+                }
+                else {
+                    keepPaths.add(file.filePath);
+                }
+            }
+            let totalSize = this.getCacheSize();
+            for (const file of cacheFiles) {
+                if (totalSize <= maxSizeBytes) {
+                    break;
+                }
+                if (fs.existsSync(file.filePath)) {
+                    fs.rmSync(file.filePath, { force: true });
+                    totalSize -= file.size;
+                    keepPaths.delete(file.filePath);
+                }
+            }
+            for (const [sourcePath, entry] of this.cacheIndex) {
+                if (!entry.convertedPath || !keepPaths.has(entry.convertedPath) || !fs.existsSync(entry.convertedPath)) {
+                    this.cacheIndex.delete(sourcePath);
+                }
+            }
+            this.saveCacheIndex();
+        }
+        catch (error) {
+            console.error('Failed to prune PLY cache:', error);
+        }
     }
     clearCache() {
         try {

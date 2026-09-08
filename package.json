@@ -4,7 +4,7 @@
   "sponsor": {"url": "https://github.com/sponsors/reagan99"},
   "displayName": "GaussianViewer",
   "description": "View and edit 3D Gaussian Splat files (.ply, .splat, .gsplat) directly in VSCode with full SuperSplat editor integration",
-  "version": "1.0.7",
+  "version": "1.0.23",
   "icon": "logo.png",
   "files": [
     "out/**",
@@ -41,7 +41,12 @@
     "vscode"
   ],
   "activationEvents": [
-    "onCustomEditor:supersplat.viewer"
+    "onCustomEditor:supersplat.viewer",
+    "onCommand:supersplat.viewpoint.copy",
+    "onCommand:supersplat.viewpoint.save",
+    "onCommand:supersplat.viewpoint.load",
+    "onCommand:supersplat.camera.orbit.start",
+    "onCommand:supersplat.camera.orbit.stop"
   ],
   "main": "./out/optimizedExtension.js",
   "contributes": {
@@ -67,6 +72,65 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "command": "supersplat.performance.showStats",
+        "title": "GaussianViewer: Show Performance Stats"
+      },
+      {
+        "command": "supersplat.performance.clearCache",
+        "title": "GaussianViewer: Clear Cache"
+      },
+      {
+        "command": "supersplat.performance.optimizeFile",
+        "title": "GaussianViewer: Optimize Current PLY"
+      },
+      {
+        "command": "supersplat.performance.preloadFile",
+        "title": "GaussianViewer: Preload PLY"
+      },
+      {
+        "command": "supersplat.performance.contextOptimize",
+        "title": "GaussianViewer: Preload/Optimize PLY"
+      },
+      {
+        "command": "supersplat.performance.batchOptimize",
+        "title": "GaussianViewer: Batch Optimize Workspace PLY Files"
+      },
+      {
+        "command": "supersplat.performance.resetConfig",
+        "title": "GaussianViewer: Reset Performance Settings"
+      },
+      {
+        "command": "supersplat.viewpoint.copy",
+        "title": "GaussianViewer: Copy Current Viewpoint"
+      },
+      {
+        "command": "supersplat.viewpoint.save",
+        "title": "GaussianViewer: Save Current Viewpoint"
+      },
+      {
+        "command": "supersplat.viewpoint.load",
+        "title": "GaussianViewer: Load Viewpoint"
+      },
+      {
+        "command": "supersplat.camera.orbit.start",
+        "title": "GaussianViewer: Start Cinematic Orbit"
+      },
+      {
+        "command": "supersplat.camera.orbit.stop",
+        "title": "GaussianViewer: Stop Cinematic Orbit"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "supersplat.performance.contextOptimize",
+          "when": "resourceExtname == .ply",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "VSCode SuperSplat",
       "properties": {
@@ -104,6 +168,41 @@
           "type": "number",
           "default": 10,
           "description": "File size threshold in MB for using optimized transfer methods"
+        },
+        "supersplat.performance.chunkSize": {
+          "type": "number",
+          "default": 8388608,
+          "description": "Default chunk size in bytes for large file transfer"
+        },
+        "supersplat.performance.enableDirectUriTransfer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use direct webview file URIs when possible"
+        },
+        "supersplat.performance.enablePerformanceLogging": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable performance metrics logging"
+        },
+        "supersplat.performance.enableGarbageCollection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Periodically prune stale or oversized PLY cache files"
+        },
+        "supersplat.performance.cacheMaxAge": {
+          "type": "number",
+          "default": 86400000,
+          "description": "Maximum age of cached optimized PLY files in milliseconds"
+        },
+        "supersplat.performance.maxCacheSize": {
+          "type": "number",
+          "default": 500,
+          "description": "Maximum PLY cache size in MB before older cache files are pruned"
+        },
+        "supersplat.performance.gcInterval": {
+          "type": "number",
+          "default": 300000,
+          "description": "Interval in milliseconds for pruning stale PLY cache files"
         }
       }
     }
