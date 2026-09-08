@@ -4,7 +4,7 @@
   "sponsor": {"url": "https://github.com/sponsors/reagan99"},
   "displayName": "GaussianViewer",
   "description": "View and edit 3D Gaussian Splat files (.ply, .splat, .gsplat) directly in VSCode with full SuperSplat editor integration",
-  "version": "1.0.24",
+  "version": "1.0.8",
   "icon": "logo.png",
   "files": [
     "out/**",
