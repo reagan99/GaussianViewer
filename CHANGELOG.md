@@ -18,6 +18,8 @@
 - Improved PLY cache pruning and cache statistics.
 - Fixed overlay coordinate alignment with SuperSplat's displayed 3DGS transform.
 - Fixed overlay rendering order so points and cameras no longer cover SuperSplat UI panels.
+- Fixed Scene Manager layering so File, Select, Render, and Help menus open above the panel.
+- Added a compact collapse button and draggable header for the Scene Manager.
 - Fixed overlay file-picker cancellation state.
 
 ## [1.0.7] - 2026-01-27

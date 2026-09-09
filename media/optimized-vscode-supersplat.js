@@ -248,6 +248,8 @@
                 requestStreamingMode(finalSettings);
             }
             createGaussianViewerToolbar();
+            installScenePanelControls();
+            installTopMenuLayerLift();
             installOrbitInteractionTracking();
             
             function getOptimalChunkSize(fileSize) {
@@ -772,12 +774,52 @@
                         color: #8fa1a5;
                         font-size: 10px;
                     }
-                    #top-container,
-                    #tooltips-container,
-                    .panel,
-                    #scene-panel,
-                    #view-panel {
-                        z-index: 20;
+                    #menu-bar {
+                        z-index: 300 !important;
+                    }
+                    .pcui-menu,
+                    .pcui-menu-items,
+                    .pcui-overlay,
+                    #tooltips-container {
+                        z-index: 400 !important;
+                    }
+                    #scene-panel {
+                        z-index: 40 !important;
+                    }
+                    #scene-panel.gv-scene-panel-moving {
+                        cursor: move;
+                        user-select: none;
+                    }
+                    #scene-panel.gv-scene-panel-collapsed {
+                        height: auto !important;
+                        max-height: 30px;
+                    }
+                    #scene-panel.gv-scene-panel-collapsed > *:not(.panel-header) {
+                        display: none !important;
+                    }
+                    #scene-panel .panel-header {
+                        cursor: move;
+                    }
+                    #scene-panel .gv-scene-collapse-button {
+                        width: 22px;
+                        height: 22px;
+                        flex: 0 0 22px;
+                        margin: 0 2px;
+                        padding: 0;
+                        border: 1px solid #202020;
+                        border-radius: 4px;
+                        background: #2c2c2c;
+                        color: #b3aaac;
+                        font: bold 14px/20px "Helvetica Neue", Arial, Helvetica, sans-serif;
+                        cursor: pointer;
+                    }
+                    #scene-panel .gv-scene-collapse-button:hover {
+                        color: #fff;
+                        border-color: #f60;
+                        background: #202020;
+                    }
+                    body.gv-menu-layer-active #scene-panel {
+                        z-index: 10 !important;
                     }
                 `;
                 document.head.appendChild(style);
@@ -967,6 +1009,139 @@
                         }
                     }, 250);
                 }
+            }
+
+            function clamp(value, min, max) {
+                return Math.min(Math.max(value, min), max);
+            }
+
+            function enhanceScenePanel() {
+                const scenePanel = document.getElementById('scene-panel');
+                const header = scenePanel?.querySelector?.('.panel-header');
+                if (!scenePanel || !header || scenePanel.dataset.gvSceneEnhanced === 'true') {
+                    return !!scenePanel;
+                }
+
+                scenePanel.dataset.gvSceneEnhanced = 'true';
+                scenePanel.style.pointerEvents = 'auto';
+                header.title = 'Drag Scene Manager';
+
+                const collapseButton = document.createElement('button');
+                collapseButton.type = 'button';
+                collapseButton.className = 'gv-scene-collapse-button';
+                collapseButton.textContent = '-';
+                collapseButton.title = 'Collapse Scene Manager';
+                collapseButton.addEventListener('pointerdown', event => event.stopPropagation());
+                collapseButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const collapsed = scenePanel.classList.toggle('gv-scene-panel-collapsed');
+                    collapseButton.textContent = collapsed ? '+' : '-';
+                    collapseButton.title = collapsed ? 'Expand Scene Manager' : 'Collapse Scene Manager';
+                });
+                header.appendChild(collapseButton);
+
+                let dragState = null;
+                const interactiveSelector = 'button, input, select, textarea, a, [role="button"], .pcui-button, .panel-header-button, .gv-scene-collapse-button';
+
+                const movePanel = event => {
+                    if (!dragState) {
+                        return;
+                    }
+                    event.preventDefault();
+                    const panelWidth = scenePanel.offsetWidth || dragState.width;
+                    const panelHeight = scenePanel.offsetHeight || dragState.height;
+                    const maxLeft = Math.max(0, window.innerWidth - panelWidth - 8);
+                    const maxTop = Math.max(0, window.innerHeight - panelHeight - 8);
+                    const nextLeft = clamp(dragState.left + event.clientX - dragState.startX, 0, maxLeft);
+                    const nextTop = clamp(dragState.top + event.clientY - dragState.startY, 0, maxTop);
+                    scenePanel.style.left = `${Math.round(nextLeft)}px`;
+                    scenePanel.style.top = `${Math.round(nextTop)}px`;
+                    scenePanel.style.right = 'auto';
+                    scenePanel.style.bottom = 'auto';
+                    scenePanel.style.transform = 'none';
+                };
+
+                const stopDrag = event => {
+                    if (!dragState) {
+                        return;
+                    }
+                    try {
+                        header.releasePointerCapture?.(event.pointerId);
+                    } catch (_) {
+                        // Some WebView builds throw if capture was already released.
+                    }
+                    scenePanel.classList.remove('gv-scene-panel-moving');
+                    window.removeEventListener('pointermove', movePanel, true);
+                    window.removeEventListener('pointerup', stopDrag, true);
+                    window.removeEventListener('pointercancel', stopDrag, true);
+                    dragState = null;
+                };
+
+                header.addEventListener('pointerdown', event => {
+                    if (event.button !== 0 || event.target?.closest?.(interactiveSelector)) {
+                        return;
+                    }
+                    const rect = scenePanel.getBoundingClientRect();
+                    dragState = {
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        left: rect.left,
+                        top: rect.top,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                    scenePanel.classList.add('gv-scene-panel-moving');
+                    scenePanel.style.left = `${Math.round(rect.left)}px`;
+                    scenePanel.style.top = `${Math.round(rect.top)}px`;
+                    scenePanel.style.right = 'auto';
+                    scenePanel.style.bottom = 'auto';
+                    scenePanel.style.transform = 'none';
+                    header.setPointerCapture?.(event.pointerId);
+                    window.addEventListener('pointermove', movePanel, true);
+                    window.addEventListener('pointerup', stopDrag, true);
+                    window.addEventListener('pointercancel', stopDrag, true);
+                    event.preventDefault();
+                });
+
+                return true;
+            }
+
+            function installScenePanelControls() {
+                if (enhanceScenePanel()) {
+                    return;
+                }
+                const startTime = Date.now();
+                const timer = setInterval(() => {
+                    if (enhanceScenePanel() || Date.now() - startTime > 10000) {
+                        clearInterval(timer);
+                    }
+                }, 250);
+            }
+
+            function installTopMenuLayerLift() {
+                let clearTimer = null;
+                const activate = () => {
+                    document.body.classList.add('gv-menu-layer-active');
+                    clearTimeout(clearTimer);
+                    clearTimer = setTimeout(() => {
+                        document.body.classList.remove('gv-menu-layer-active');
+                    }, 1200);
+                };
+
+                document.addEventListener('pointerdown', event => {
+                    if (event.target?.closest?.('#menu-bar, .pcui-menu, .pcui-menu-items')) {
+                        activate();
+                    } else {
+                        document.body.classList.remove('gv-menu-layer-active');
+                    }
+                }, true);
+
+                document.addEventListener('mouseover', event => {
+                    if (event.target?.closest?.('#menu-bar, .pcui-menu, .pcui-menu-items')) {
+                        activate();
+                    }
+                }, true);
             }
 
             function waitForSceneEvents(timeoutMs = 5000) {
