@@ -1,6 +1,6 @@
 # Change Log
 
-## [1.0.8] - 2026-09-08
+## [1.0.9] - 2026-09-09
 
 ### Major Update
 - Added Scene Manager controls for loading auxiliary scene overlays without leaving the viewer.
@@ -21,6 +21,9 @@
 - Fixed Scene Manager layering so File, Select, Render, and Help menus open above the panel.
 - Added a compact collapse button and draggable header for the Scene Manager.
 - Fixed overlay file-picker cancellation state.
+
+### Release Notes
+- This release is the public rollup of the recent GaussianViewer improvements after 1.0.7.
 
 ## [1.0.7] - 2026-01-27
 
