@@ -1,14 +1,13 @@
 # Change Log
 
-## [1.0.11] - 2026-09-11
-
-### Changed
-- Added a direct-first loading path for 128-768MB PLY files so SuperSplat can import the VS Code webview URL directly before falling back to chunk streaming.
-
-## [1.0.10] - 2026-09-10
+## [1.0.10] - 2026-09-11
 
 ### Fixed
-- Fixed mid-sized and large PLY files opening to an empty coordinate/grid view in VS Code Remote SSH by streaming files from 128MB upward instead of relying on direct webview URL fetches.
+- Fixed mid-sized and large PLY files opening to an empty coordinate/grid view in VS Code Remote SSH.
+
+### Changed
+- Made SuperSplat direct URL import the default loading path for local and remote files, avoiding an extra fetch/blob copy before import.
+- Kept chunk streaming as an error fallback only, instead of switching by file size or a fixed timeout.
 
 ## [1.0.9] - 2026-09-09
 

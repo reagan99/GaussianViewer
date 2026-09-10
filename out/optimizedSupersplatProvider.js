@@ -1100,14 +1100,10 @@ class OptimizedSuperSplatProvider {
         const optimizedStats = fs.statSync(optimizedPath);
         const optimizedFileSizeMB = optimizedStats.size / (1024 * 1024);
         
-        // Mid-sized files are fastest when SuperSplat imports the VS Code webview URL
-        // directly. Keep streaming as a watchdog fallback and for very large files.
-        const directFirstThresholdMB = 128;
-        const directFirstMaxMB = 768;
-        const shouldTryDirectFirst = optimizedFileSizeMB >= directFirstThresholdMB && optimizedFileSizeMB <= directFirstMaxMB;
-        const shouldUseStreaming = optimizedFileSizeMB > directFirstMaxMB;
-        const loadingMode = shouldUseStreaming ? 'streaming' : (shouldTryDirectFirst ? 'direct-first' : 'direct');
-        this.logPerformance(`[SuperSplat] Loading mode: ${loadingMode} (${optimizedFileSizeMB.toFixed(2)}MB, direct-first ${directFirstThresholdMB}-${directFirstMaxMB}MB)`);
+        // Prefer SuperSplat's native URL import path. It lets the webview read the
+        // VS Code resource URL without first copying the whole file through JS.
+        const shouldUseStreaming = false;
+        this.logPerformance(`[SuperSplat] Loading mode: direct-url (${optimizedFileSizeMB.toFixed(2)}MB)`);
         
         const initialData = {
             fileToLoad: shouldUseStreaming ? "" : fileToLoad.toString(), // Empty for streaming mode
@@ -1119,9 +1115,8 @@ class OptimizedSuperSplatProvider {
             optimizedLoading: true,
             fileSizeMB: optimizedFileSizeMB,
             useStreaming: shouldUseStreaming, // Explicit streaming flag
-            directImport: shouldTryDirectFirst,
-            directImportFallback: shouldTryDirectFirst,
-            directImportTimeoutMs: 30000,
+            directImport: true,
+            directImportFallback: true,
         };
         return `<meta id="vscode-supersplat-data" data-settings="${JSON.stringify(initialData).replace(/"/g, "&quot;")}">`;
     }

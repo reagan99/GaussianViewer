@@ -154,8 +154,8 @@
             vscode?.postMessage({ type: 'importRemote', requestId, remotePath });
         }
         
-        // For very large files (>1GB), use streaming fallback instead of bypass
-        if (finalSettings.fileSizeMB > 1000) {
+        // Streaming is an error fallback, not a size-based default.
+        if (finalSettings.useStreaming) {
             console.log('🚀 [STREAMING] Large file detected:', finalSettings.fileSizeMB, 'MB');
             console.log('🚀 [STREAMING] Using base64 chunked streaming (1.0.1 style)');
             
@@ -3045,15 +3045,8 @@
                 return;
             }
             
-            // For very large files (>1GB), go straight to streaming
-            if (fileSizeMB > 1000) {
-                console.log(`📥 [DYNAMIC] Very large file (${fileSizeMB.toFixed(2)}MB > 1000MB) - requesting streaming immediately`);
-                requestStreamingMode(settings);
-                return;
-            }
-            
-            // For smaller files, try direct loading with monitoring
-            console.log(`🚀 [DYNAMIC] File suitable for direct loading (${fileSizeMB.toFixed(2)}MB <= 1000MB) - trying normal mode with monitoring`);
+            // Try direct loading first. Streaming is reserved for actual failures.
+            console.log(`🚀 [DYNAMIC] Trying direct loading first (${fileSizeMB.toFixed(2)}MB)`);
             
             // Initialize SuperSplat and try direct loading
             initializeSuperSplat();
@@ -3541,34 +3534,19 @@
         }
 
         async function importUrlIntoSuperSplatWithFallback(fileUri, loadedFilename) {
-            const timeoutMs = Number(settings.directImportTimeoutMs) || 30000;
-            console.log('⚡ [SUPERSPLAT] Direct URL import first:', fileUri);
+            console.log('⚡ [SUPERSPLAT] Direct URL import:', fileUri);
             logPerformance(`Direct import start: ${loadedFilename} (${settings.fileSizeMB?.toFixed?.(2) || 'unknown'}MB)`);
 
-            let timeoutId = null;
-            const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => {
-                    reject(new Error(`Direct import did not finish within ${timeoutMs}ms`));
-                }, timeoutMs);
-            });
-
             try {
-                await Promise.race([
-                    importUrlIntoSuperSplat(fileUri, loadedFilename),
-                    timeoutPromise
-                ]);
+                await importUrlIntoSuperSplat(fileUri, loadedFilename);
             } catch (error) {
-                console.warn('⚠️ [SUPERSPLAT] Direct import watchdog triggered:', error.message);
-                logPerformance(`Direct import fallback: ${error.message}`);
+                console.warn('⚠️ [SUPERSPLAT] Direct import failed:', error.message);
+                logPerformance(`Direct import failed, falling back to streaming: ${error.message}`);
                 if (settings.directImportFallback) {
                     requestStreamingMode(settings);
                     return;
                 }
                 throw error;
-            } finally {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
             }
         }
 
