@@ -1100,14 +1100,18 @@ class OptimizedSuperSplatProvider {
         const optimizedStats = fs.statSync(optimizedPath);
         const optimizedFileSizeMB = optimizedStats.size / (1024 * 1024);
         
-        // VS Code Remote webview URLs can stall on mid-sized PLY fetches, leaving only
-        // the empty SuperSplat scene visible. Stream anything large enough to be risky.
-        const streamingThresholdMB = 128;
-        const shouldUseStreaming = optimizedFileSizeMB >= streamingThresholdMB;
-        this.logPerformance(`[SuperSplat] Loading mode: ${shouldUseStreaming ? 'streaming' : 'direct'} (${optimizedFileSizeMB.toFixed(2)}MB, threshold ${streamingThresholdMB}MB)`);
+        // Mid-sized files are fastest when SuperSplat imports the VS Code webview URL
+        // directly. Keep streaming as a watchdog fallback and for very large files.
+        const directFirstThresholdMB = 128;
+        const directFirstMaxMB = 768;
+        const shouldTryDirectFirst = optimizedFileSizeMB >= directFirstThresholdMB && optimizedFileSizeMB <= directFirstMaxMB;
+        const shouldUseStreaming = optimizedFileSizeMB > directFirstMaxMB;
+        const loadingMode = shouldUseStreaming ? 'streaming' : (shouldTryDirectFirst ? 'direct-first' : 'direct');
+        this.logPerformance(`[SuperSplat] Loading mode: ${loadingMode} (${optimizedFileSizeMB.toFixed(2)}MB, direct-first ${directFirstThresholdMB}-${directFirstMaxMB}MB)`);
         
         const initialData = {
             fileToLoad: shouldUseStreaming ? "" : fileToLoad.toString(), // Empty for streaming mode
+            fileName: path.basename(document.uri.fsPath),
             backgroundColor: config.get("backgroundColor", "#1e1e1e"),
             enableEditing: config.get("enableEditing", true),
             showGrid: config.get("showGrid", true),
@@ -1115,6 +1119,9 @@ class OptimizedSuperSplatProvider {
             optimizedLoading: true,
             fileSizeMB: optimizedFileSizeMB,
             useStreaming: shouldUseStreaming, // Explicit streaming flag
+            directImport: shouldTryDirectFirst,
+            directImportFallback: shouldTryDirectFirst,
+            directImportTimeoutMs: 30000,
         };
         return `<meta id="vscode-supersplat-data" data-settings="${JSON.stringify(initialData).replace(/"/g, "&quot;")}">`;
     }

@@ -2667,10 +2667,12 @@
                 };
                 reader.readAsArrayBuffer(blob.slice(0, 100));
                 
-                const url = URL.createObjectURL(blob);
                 const filename = streamingState.filename || window.originalFileName || 'large-file.ply';
                 console.log('📤 [BASE64] Loading into SuperSplat with filename:', filename);
-                loadFileIntoSuperSplat(url, filename);
+                importBlobIntoSuperSplat(blob, filename).catch(error => {
+                    console.error('❌ [BASE64] Chunked import failed:', error);
+                    logPerformance(`Chunked import error: ${error.message}`);
+                });
                 
                 streamingState.isStreaming = false;
                 streamingState.isBase64Mode = false;
@@ -3224,8 +3226,13 @@
                 }
                 
                 // Initialize variables first
-                let detectedFilename = filename || window.originalFileName || 'unknown-file.ply';
+                let detectedFilename = filename || settings.fileName || window.originalFileName || 'unknown-file.ply';
                 let fileData;
+
+                if (settings.directImport && !fileUri.startsWith('blob:')) {
+                    await importUrlIntoSuperSplatWithFallback(fileUri, detectedFilename);
+                    return;
+                }
                 
                 // Handle different URI types
                 try {
@@ -3481,6 +3488,107 @@
                 }
                 throw error; // Re-throw for upstream handling
             }
+        }
+
+        async function importBlobIntoSuperSplat(blob, loadedFilename) {
+            console.log('🎯 [SUPERSPLAT] Preparing to load into SuperSplat...');
+            console.log(`🔧 [SUPERSPLAT] Blob size: ${(blob.size / 1024 / 1024).toFixed(2)} MB`);
+            console.log(`🔧 [SUPERSPLAT] Filename: ${loadedFilename}`);
+            logPerformance(`Import start: ${loadedFilename} (${(blob.size / 1024 / 1024).toFixed(2)}MB)`);
+
+            if (!window.scene) {
+                console.error('❌ [SUPERSPLAT] window.scene not available');
+                throw new Error('SuperSplat scene not initialized');
+            }
+
+            if (!window.scene.events) {
+                console.error('❌ [SUPERSPLAT] window.scene.events not available');
+                throw new Error('SuperSplat events system not available');
+            }
+
+            const url = URL.createObjectURL(blob);
+            console.log(`🔧 [SUPERSPLAT] Created object URL: ${url}`);
+            console.log('✅ [SUPERSPLAT] Scene and events available, invoking import...');
+
+            try {
+                await window.scene.events.invoke('import', url, loadedFilename);
+                console.log('✅ [SUPERSPLAT] File successfully loaded into SuperSplat');
+
+                const renderTime = performance.now() - perfMetrics.renderStart;
+                logPerformance(`Render complete: ${renderTime.toFixed(2)}ms total`);
+            } catch (importError) {
+                console.error('❌ [SUPERSPLAT] Import failed:', importError);
+                console.error('❌ [SUPERSPLAT] Import error details:', importError.message);
+                console.log('🔄 [SUPERSPLAT] Trying alternative import method...');
+
+                if (window.scene && window.scene.loadFile) {
+                    console.log('🔄 [SUPERSPLAT] Trying scene.loadFile method...');
+                    await window.scene.loadFile(url, loadedFilename);
+                    console.log('✅ [SUPERSPLAT] File loaded via alternative method');
+                } else if (window.scene && window.scene.import) {
+                    console.log('🔄 [SUPERSPLAT] Trying scene.import method...');
+                    await window.scene.import(url, loadedFilename);
+                    console.log('✅ [SUPERSPLAT] File loaded via scene.import');
+                } else {
+                    throw new Error(`SuperSplat import failed: ${importError.message}`);
+                }
+            }
+
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+                console.log('🧹 [SUPERSPLAT] Object URL cleaned up');
+            }, 30000);
+        }
+
+        async function importUrlIntoSuperSplatWithFallback(fileUri, loadedFilename) {
+            const timeoutMs = Number(settings.directImportTimeoutMs) || 30000;
+            console.log('⚡ [SUPERSPLAT] Direct URL import first:', fileUri);
+            logPerformance(`Direct import start: ${loadedFilename} (${settings.fileSizeMB?.toFixed?.(2) || 'unknown'}MB)`);
+
+            let timeoutId = null;
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error(`Direct import did not finish within ${timeoutMs}ms`));
+                }, timeoutMs);
+            });
+
+            try {
+                await Promise.race([
+                    importUrlIntoSuperSplat(fileUri, loadedFilename),
+                    timeoutPromise
+                ]);
+            } catch (error) {
+                console.warn('⚠️ [SUPERSPLAT] Direct import watchdog triggered:', error.message);
+                logPerformance(`Direct import fallback: ${error.message}`);
+                if (settings.directImportFallback) {
+                    requestStreamingMode(settings);
+                    return;
+                }
+                throw error;
+            } finally {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
+            }
+        }
+
+        async function importUrlIntoSuperSplat(fileUri, loadedFilename) {
+            if (!window.scene) {
+                console.error('❌ [SUPERSPLAT] window.scene not available');
+                throw new Error('SuperSplat scene not initialized');
+            }
+
+            if (!window.scene.events) {
+                console.error('❌ [SUPERSPLAT] window.scene.events not available');
+                throw new Error('SuperSplat events system not available');
+            }
+
+            console.log('✅ [SUPERSPLAT] Scene and events available, invoking direct URL import...');
+            await window.scene.events.invoke('import', fileUri, loadedFilename);
+            console.log('✅ [SUPERSPLAT] Direct URL import completed');
+
+            const renderTime = performance.now() - perfMetrics.renderStart;
+            logPerformance(`Render complete: ${renderTime.toFixed(2)}ms total (direct URL)`);
         }
 
         // Performance debugging (only in debug mode)

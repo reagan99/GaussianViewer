@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 	<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
 		<Metadata>
-			<Identity Language="en-US" Id="gaussian-viewer" Version="1.0.10" Publisher="GaussianViewer" />
+			<Identity Language="en-US" Id="gaussian-viewer" Version="1.0.11" Publisher="GaussianViewer" />
 			<DisplayName>GaussianViewer</DisplayName>
 			<Description xml:space="preserve">View and edit 3D Gaussian Splat files (.ply, .splat, .gsplat) directly in VSCode with full SuperSplat editor integration</Description>
 			<Tags>3d,gaussian,splat,ply,3dgs,point cloud,viewer,editor,vscode</Tags>

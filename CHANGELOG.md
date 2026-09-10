@@ -1,5 +1,10 @@
 # Change Log
 
+## [1.0.11] - 2026-09-11
+
+### Changed
+- Added a direct-first loading path for 128-768MB PLY files so SuperSplat can import the VS Code webview URL directly before falling back to chunk streaming.
+
 ## [1.0.10] - 2026-09-10
 
 ### Fixed
