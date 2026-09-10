@@ -1,5 +1,10 @@
 # Change Log
 
+## [1.0.10] - 2026-09-10
+
+### Fixed
+- Fixed mid-sized and large PLY files opening to an empty coordinate/grid view in VS Code Remote SSH by streaming files from 128MB upward instead of relying on direct webview URL fetches.
+
 ## [1.0.9] - 2026-09-09
 
 ### Major Update

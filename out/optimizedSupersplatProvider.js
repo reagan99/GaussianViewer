@@ -1100,8 +1100,11 @@ class OptimizedSuperSplatProvider {
         const optimizedStats = fs.statSync(optimizedPath);
         const optimizedFileSizeMB = optimizedStats.size / (1024 * 1024);
         
-        // Large remote files need explicit streaming progress; keep direct URLs for smaller files.
-        const shouldUseStreaming = optimizedFileSizeMB > 500;
+        // VS Code Remote webview URLs can stall on mid-sized PLY fetches, leaving only
+        // the empty SuperSplat scene visible. Stream anything large enough to be risky.
+        const streamingThresholdMB = 128;
+        const shouldUseStreaming = optimizedFileSizeMB >= streamingThresholdMB;
+        this.logPerformance(`[SuperSplat] Loading mode: ${shouldUseStreaming ? 'streaming' : 'direct'} (${optimizedFileSizeMB.toFixed(2)}MB, threshold ${streamingThresholdMB}MB)`);
         
         const initialData = {
             fileToLoad: shouldUseStreaming ? "" : fileToLoad.toString(), // Empty for streaming mode
