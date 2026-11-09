@@ -1,0 +1,86 @@
+name: Refresh marketplace badge
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/marketplace-badge.yml]
+  schedule:
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: marketplace-badge
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read both registries and build the badge
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          extension = 'GaussianViewer.gaussian-viewer'
+          query = Request(
+              'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery',
+              data=json.dumps({
+                  'filters': [{'criteria': [{'filterType': 7, 'value': extension}]}],
+                  'flags': 256,  # IncludeStatistics
+              }).encode(),
+              headers={
+                  'Accept': 'application/json;api-version=3.0-preview.1',
+                  'Content-Type': 'application/json',
+              },
+          )
+          with urlopen(query, timeout=30) as response:
+              listing = json.load(response)['results'][0]['extensions'][0]
+              installs = next(
+                  stat['value'] for stat in listing['statistics']
+                  if stat['statisticName'] == 'install'
+              )
+
+          with urlopen('https://open-vsx.org/api/GaussianViewer/gaussian-viewer', timeout=30) as response:
+              downloads = json.load(response)['downloadCount']
+
+          if any(type(count) not in (int, float) or count < 0 or count != int(count)
+                 for count in (installs, downloads)):
+              raise ValueError('Expected non-negative whole counts from both registries')
+
+          badge = {
+              'schemaVersion': 1,
+              'label': 'installs + downloads',
+              'message': f'{int(installs + downloads):,}',
+              'color': 'brightgreen',
+          }
+          Path('marketplace-activity.json').write_text(json.dumps(badge) + '\n')
+          print(f"Marketplace installs: {int(installs):,}, Open VSX downloads: {int(downloads):,}")
+          PY
+
+      - name: Publish badge data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git --hostname github.com
+          git init --initial-branch=badge-data "$RUNNER_TEMP/badge-data"
+          cd "$RUNNER_TEMP/badge-data"
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          if git ls-remote --exit-code --heads origin refs/heads/badge-data; then
+            git fetch --depth=1 origin badge-data
+            git reset --hard FETCH_HEAD
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then exit "$status"; fi
+          fi
+          cp "$GITHUB_WORKSPACE/marketplace-activity.json" .
+          git add marketplace-activity.json
+          if ! git diff --cached --quiet; then
+            git -c user.name='github-actions[bot]' \
+                -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+                commit -m 'Refresh marketplace badge data'
+            git push origin HEAD:refs/heads/badge-data
+          fi
