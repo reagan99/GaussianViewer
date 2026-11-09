@@ -1,12 +1,12 @@
 # Gaussian Viewer
 
 [![VS Code Marketplace version](https://vsmarketplacebadges.dev/version-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer)
-[![VS Code Marketplace installs](https://vsmarketplacebadges.dev/installs-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer)
 [![VS Code Marketplace rating](https://vsmarketplacebadges.dev/rating-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer&ssr=false#review-details)
 
 [![Open VSX version](https://img.shields.io/open-vsx/v/GaussianViewer/gaussian-viewer.svg?label=Open%20VSX)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
-[![Open VSX downloads](https://img.shields.io/open-vsx/dt/GaussianViewer/gaussian-viewer.svg)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
 [![Open VSX rating](https://img.shields.io/open-vsx/rating/GaussianViewer/gaussian-viewer.svg)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
+
+[![VS Code Marketplace installs plus Open VSX downloads](https://img.shields.io/endpoint.svg?url=https%3A%2F%2Fraw.githubusercontent.com%2Freagan99%2FGaussianViewer%2Fbadge-data%2Fmarketplace-activity.json)](https://github.com/reagan99/GaussianViewer#-installation)
 
 ---
 
@@ -46,7 +46,7 @@ This extension allows you to view and interact with `.ply`, `.splat`, or `.gspla
 3. Search for **Gaussian Viewer**
 4. Click **Install**
 
-Or install directly via [Marketplace Link](https://marketplace.visualstudio.com/items?itemName=gaussianviewer.gaussian-viewer).
+Or install directly from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer) or [Open VSX](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer).
 
 ---
 
