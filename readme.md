@@ -1,8 +1,12 @@
 # Gaussian Viewer
 
-[![version](https://img.shields.io/visual-studio-marketplace/v/gaussianviewer.gaussian-viewer?label=version)](https://marketplace.visualstudio.com/items?itemName=gaussianviewer.gaussian-viewer)
-[![installs](https://img.shields.io/visual-studio-marketplace/i/gaussianviewer.gaussian-viewer?color=brightgreen&label=installs)](https://marketplace.visualstudio.com/items?itemName=gaussianviewer.gaussian-viewer)
-[![rating](https://img.shields.io/visual-studio-marketplace/r/gaussianviewer.gaussian-viewer?color=yellow)](https://marketplace.visualstudio.com/items?itemName=gaussianviewer.gaussian-viewer)
+[![VS Code Marketplace version](https://vsmarketplacebadges.dev/version-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer)
+[![VS Code Marketplace installs](https://vsmarketplacebadges.dev/installs-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer)
+[![VS Code Marketplace rating](https://vsmarketplacebadges.dev/rating-short/GaussianViewer.gaussian-viewer.svg)](https://marketplace.visualstudio.com/items?itemName=GaussianViewer.gaussian-viewer&ssr=false#review-details)
+
+[![Open VSX version](https://img.shields.io/open-vsx/v/GaussianViewer/gaussian-viewer.svg?label=Open%20VSX)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
+[![Open VSX downloads](https://img.shields.io/open-vsx/dt/GaussianViewer/gaussian-viewer.svg)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
+[![Open VSX rating](https://img.shields.io/open-vsx/rating/GaussianViewer/gaussian-viewer.svg)](https://open-vsx.org/extension/GaussianViewer/gaussian-viewer)
 
 ---
 
